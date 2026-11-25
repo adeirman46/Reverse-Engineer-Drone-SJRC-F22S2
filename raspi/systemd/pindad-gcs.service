@@ -1,0 +1,18 @@
+# Pindad UGV - UAV ground station as a headless relay (RTSP video + MAVLink) at boot.
+# Edit User=, WorkingDirectory= and the --mavlink address, then:
+#   sudo cp pindad-gcs.service /etc/systemd/system/ && sudo systemctl enable --now pindad-gcs
+[Unit]
+Description=Pindad UGV - UAV ground station (RTSP + MAVLink relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/Reverse-Engineer-Drone-SJRC-F22S2/raspi
+ExecStartPre=+/home/pi/Reverse-Engineer-Drone-SJRC-F22S2/raspi/gadget/setup_gadget.sh pi
+ExecStart=/usr/bin/python3 -m pindad_gcs --link gadget --headless --mavlink udpout:192.168.1.50:14550
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

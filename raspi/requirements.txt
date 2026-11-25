@@ -1,0 +1,4 @@
+# System packages (Raspberry Pi OS): see README.md - python3-gi, GStreamer + RTSP server, PyQt5 + QtWebEngine.
+# Optional Python packages:
+pymavlink>=2.4.41   # MAVLink output for QGroundControl (--mavlink)
+# PySide6>=6.8      # instead of the apt PyQt5 packages

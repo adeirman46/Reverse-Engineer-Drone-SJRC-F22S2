@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pindad UGV - UAV</title>
+<link rel="stylesheet" href="leaflet/leaflet.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="g-logo" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4dfcc0"/><stop offset="1" stop-color="#1596b8"/></linearGradient>
+  </defs>
+  <symbol id="i-logo" viewBox="0 0 64 64">
+    <rect x="2" y="2" width="60" height="60" rx="17" fill="url(#g-logo)"/>
+    <g fill="none" stroke="#03251a" stroke-width="3.4" stroke-linecap="round">
+      <path d="M23 18l18 13M41 18L23 31"/>
+      <circle cx="20" cy="16" r="6"/><circle cx="44" cy="16" r="6"/><circle cx="20" cy="33" r="6"/><circle cx="44" cy="33" r="6"/>
+    </g>
+    <rect x="27.5" y="20" width="9" height="9" rx="2.5" fill="#03251a"/>
+    <path d="M13 44h38l-4 7H17z" fill="#03251a"/>
+    <g fill="url(#g-logo)" stroke="#03251a" stroke-width="2.6"><circle cx="21" cy="52" r="4"/><circle cx="32" cy="52" r="4"/><circle cx="43" cy="52" r="4"/></g>
+  </symbol>
+  <symbol id="i-takeoff" viewBox="0 0 24 24"><path d="M12 17V4M6.5 9.5 12 4l5.5 5.5"/><path d="M5 20.5h14"/></symbol>
+  <symbol id="i-land" viewBox="0 0 24 24"><path d="M12 3v13M6.5 10.5 12 16l5.5-5.5"/><path d="M5 20.5h14"/></symbol>
+  <symbol id="i-prop" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.8"/><path d="M12 10.2C11 6 12.8 3 16 3c0 3.2-1.8 5.4-4 7.2zM13.8 12c4.2-1 7.2.8 7.2 4-3.2 0-5.4-1.8-7.2-4zM12 13.8c1 4.2-.8 7.2-4 7.2 0-3.2 1.8-5.4 4-7.2zM10.2 12C6 13 3 11.2 3 8c3.2 0 5.4 1.8 7.2 4z"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3.5 11 12 4l8.5 7"/><path d="M5.5 9.5V20h4.5v-5.5h4V20h4.5V9.5"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="5" width="3.6" height="14" rx="1.2"/><rect x="13.9" y="5" width="3.6" height="14" rx="1.2"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="17" r="2"/></symbol>
+  <symbol id="i-gps" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="7.5"/><path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3"/></symbol>
+  <symbol id="i-remote" viewBox="0 0 24 24"><rect x="3.5" y="8" width="17" height="11" rx="4"/><path d="M8 8V4M16 8V4"/><circle cx="8.5" cy="13.5" r="1.6"/><circle cx="15.5" cy="13.5" r="1.6"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M6 14.5 12 8.5l6 6"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M6 9.5 12 15.5l6-6"/></symbol>
+  <symbol id="i-right" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6"/></symbol>
+  <symbol id="i-left" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><circle cx="9" cy="10" r="1.8"/><path d="m4 17.5 5-5 4 4 2.5-2.5 4.5 4.5"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></symbol>
+  <symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="6.5" width="13" height="11" rx="2.5"/><path d="m16 10.5 5-3v9l-5-3"/></symbol>
+  <symbol id="i-novideo" viewBox="0 0 24 24"><rect x="3" y="6.5" width="13" height="11" rx="2.5"/><path d="m16 10.5 5-3v9l-5-3M3 3l18 18"/></symbol>
+  <symbol id="i-map" viewBox="0 0 24 24"><path d="M9 4.5 3.5 6.5v13L9 17.5l6 2 5.5-2v-13L15 6.5z"/><path d="M9 4.5v13M15 6.5v13"/></symbol>
+  <symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="6" r="2.2"/><path d="M8.2 18H15a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h6.8"/></symbol>
+  <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h13l-3.5-3.5M20 16H7l3.5 3.5"/></symbol>
+  <symbol id="i-sticks" viewBox="0 0 24 24"><circle cx="7" cy="14" r="4"/><circle cx="17" cy="14" r="4"/><circle cx="7" cy="14" r="1.2"/><circle cx="17" cy="14" r="1.2"/><path d="M5 5.5h4M15 5.5h4"/></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
+  <symbol id="i-me" viewBox="0 0 24 24"><path d="M12 21s7-6.2 7-11.5a7 7 0 1 0-14 0C5 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3.5 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></symbol>
+  <symbol id="i-fit" viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5.5 21V4M5.5 4.5h11l-2.5 4 2.5 4h-11"/></symbol>
+  <symbol id="i-usb" viewBox="0 0 24 24"><path d="M9 3h6v6H9zM7 9h10v5a5 5 0 0 1-10 0zM12 19v2.5"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 4 2.5 20h19z"/><path d="M12 10v4.5M12 17.2v.1"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20.5h4"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 40 40"><path d="M20 3.5 32.5 34 20 26.8 7.5 34z" fill="#2ee6a6" stroke="#fff" stroke-width="2.6" stroke-linejoin="round"/></symbol>
+</svg>
+
+<div id="app" class="view-fly main-video sticks-on">
+  <div id="novideo"><div class="nv"><svg class="i"><use href="#i-novideo"/></svg><span id="nv-text">No video</span></div></div>
+  <div id="mapwrap"><div id="map"></div></div>
+  <div id="osd"><div id="horizon"></div><div id="cross"></div></div>
+  <div id="flash"></div>
+
+  <header id="toolbar">
+    <div class="brand glass"><svg><use href="#i-logo"/></svg><div><b>PINDAD</b><span>UGV · UAV</span></div></div>
+    <button class="pill glass" id="pill-state" title="Flight mode"><i class="dot" id="state-dot"></i><span id="state-text">Starting…</span><svg class="i sm chev"><use href="#i-down"/></svg></button>
+    <div class="spacer"></div>
+    <div class="stats glass">
+      <div class="stat" id="st-gps"><svg class="i sm"><use href="#i-gps"/></svg><b class="num" id="v-gps">--</b></div>
+      <div class="stat" id="st-bat"><div class="bat"><i id="bat-fill"></i></div><b class="num" id="v-bat">--%</b><small class="num" id="v-batv">--.-V</small></div>
+      <div class="stat" id="st-rc"><svg class="i sm"><use href="#i-remote"/></svg><b class="num" id="v-rc">--%</b></div>
+      <div class="stat" id="st-time"><svg class="i sm"><use href="#i-clock"/></svg><b class="num" id="v-time">00:00</b></div>
+    </div>
+    <button class="tb-btn glass" id="btn-plan" title="Mission planner"><svg class="i sm"><use href="#i-route"/></svg><span>Plan</span></button>
+    <button class="tb-btn glass" id="btn-sticks" title="Virtual sticks"><svg class="i"><use href="#i-sticks"/></svg></button>
+    <button class="tb-btn glass" id="btn-settings" title="Settings"><svg class="i"><use href="#i-settings"/></svg></button>
+  </header>
+
+  <div id="tape"><div class="strip" id="tape-strip"></div><div class="box num" id="tape-box">000°</div></div>
+  <div id="warnings"></div>
+
+  <div id="confirm">
+    <div class="cf-head">
+      <div class="cf-ic" id="cf-icon"></div>
+      <div><h3 id="cf-title">Confirm</h3><p id="cf-text"></p></div>
+      <button class="cf-x" id="cf-cancel" title="Cancel"><svg class="i sm"><use href="#i-close"/></svg></button>
+    </div>
+    <div class="slider" id="cf-slider"><div class="fill" id="cf-fill"></div><div class="label" id="cf-label">Slide to confirm</div>
+      <div class="knob" id="cf-knob"><svg class="i"><use href="#i-right"/></svg></div></div>
+  </div>
+
+  <div id="modesheet">
+    <div class="cf-head"><div class="cf-ic"><svg class="i"><use href="#i-gps"/></svg></div>
+      <div><h3>Flight mode</h3><p id="mode-now">-</p></div>
+      <button class="cf-x" id="mode-x" title="Close"><svg class="i sm"><use href="#i-close"/></svg></button></div>
+    <div class="mrow"><span>Positioning</span><div class="seg" id="mode-pos"><button data-v="0">GPS</button><button data-v="1">Attitude</button></div></div>
+    <div class="mrow"><span>Speed</span><div class="seg" id="mode-speed"><button data-v="0">Normal</button><button data-v="1">Sport</button></div></div>
+    <p class="mhint">Switch these with the remote: hold <b>GPS</b> 3 s for GPS ⇄ attitude, press the speed button for normal ⇄ sport.</p>
+    <div class="mbtns">
+      <button class="btn" id="mode-rth"><svg class="i sm"><use href="#i-home"/></svg>Home</button>
+      <button class="btn" id="mode-stop"><svg class="i sm"><use href="#i-stop"/></svg>Stop</button>
+      <button class="btn" id="mode-land"><svg class="i sm"><use href="#i-land"/></svg>Land</button>
+    </div>
+  </div>
+
+  <nav id="flytools">
+    <button class="act primary" id="btn-fly"><div class="c"><svg class="i"><use href="#i-takeoff"/></svg></div><span>Take off</span></button>
+    <button class="act" id="btn-rth"><div class="c"><svg class="i"><use href="#i-home"/></svg></div><span>Home</span></button>
+    <button class="act stop" id="btn-stop"><div class="c"><svg class="i"><use href="#i-stop"/></svg></div><span>Stop</span></button>
+  </nav>
+
+  <aside id="camtools">
+    <button class="shutter" id="btn-shutter" title="Take photo"><i></i></button>
+    <div class="recbox"><button class="rec glass" id="btn-record" title="Record video"><i></i></button><div id="rec-time" class="num"></div></div>
+    <div class="gimbal glass">
+      <button id="g-up" title="Tilt camera up"><svg class="i"><use href="#i-up"/></svg></button>
+      <div class="g-mid"><button id="g-left" title="Turn the drone left"><svg class="i"><use href="#i-left"/></svg></button><button id="g-right" title="Turn the drone right"><svg class="i"><use href="#i-right"/></svg></button></div>
+      <button id="g-down" title="Tilt camera down"><svg class="i"><use href="#i-down"/></svg></button>
+      <small id="g-pos">GIMBAL</small>
+    </div>
+  </aside>
+
+  <button id="saved" class="glass" title="Open in the gallery"><svg class="i sm"><use href="#i-image"/></svg><span id="saved-text">Saved to Gallery</span><b>Open</b></button>
+
+  <div class="tools" id="maptools">
+    <button class="glass active" id="mt-follow" title="Follow the drone"><svg class="i"><use href="#i-target"/></svg></button>
+    <button class="glass" id="mt-me" title="My position"><svg class="i"><use href="#i-me"/></svg></button>
+    <button class="glass" id="mt-layer" title="Satellite / streets"><svg class="i"><use href="#i-layers"/></svg></button>
+    <button class="glass" id="mt-search" title="Search a place"><svg class="i"><use href="#i-search"/></svg></button>
+  </div>
+  <div id="search">
+    <div class="sbar"><svg class="i sm"><use href="#i-search"/></svg><input id="s-input" type="search" placeholder="Search a place, or paste lat, lon" autocomplete="off" enterkeyhint="search"><button class="cf-x" id="s-x" title="Close"><svg class="i sm"><use href="#i-close"/></svg></button></div>
+    <div id="s-results"></div>
+  </div>
+
+  <div class="stick" id="stick-l"><div class="base"></div><span class="ax t">UP</span><span class="ax b">DOWN</span><span class="ax l">⟲</span><span class="ax r">⟳</span><div class="knob"></div></div>
+  <div class="stick" id="stick-r"><div class="base"></div><span class="ax t">FWD</span><span class="ax b">BACK</span><span class="ax l">L</span><span class="ax r">R</span><div class="knob"></div></div>
+
+  <div id="bottom">
+    <div class="tgroup glass">
+      <div class="tele"><label>ALT</label><div class="v num"><span id="t-alt">--</span><u>m</u></div></div>
+      <div class="tele"><label>DIST</label><div class="v num"><span id="t-dist">--</span><u>m</u></div></div>
+    </div>
+    <div id="pip"><div class="tag" id="pip-tag"><svg class="i"><use href="#i-map"/></svg>MAP</div><div class="swap"><svg class="i"><use href="#i-swap"/></svg></div></div>
+    <div class="tgroup glass">
+      <div class="tele"><label>H.SPD</label><div class="v num"><span id="t-hs">--</span><u>m/s</u></div></div>
+      <div class="tele"><label>V.SPD</label><div class="v num"><span id="t-vs">--</span><u>m/s</u></div></div>
+    </div>
+  </div>
+
+  <div id="mapmenu"><div class="mm-title" id="mm-title">THIS POINT</div>
+    <div class="row"><button class="btn primary" id="mm-go"><svg class="i sm"><use href="#i-flag"/></svg>Fly here</button><button class="btn" id="mm-x"><svg class="i sm"><use href="#i-close"/></svg></button></div></div>
+
+  <!-- plan view -->
+  <div class="tools" id="plantools">
+    <button class="glass" id="pt-search" title="Search a place"><svg class="i"><use href="#i-search"/></svg></button>
+    <button class="glass" id="pt-fit" title="Show the whole route"><svg class="i"><use href="#i-fit"/></svg></button>
+    <button class="glass" id="pt-drone" title="Drone position"><svg class="i"><use href="#i-target"/></svg></button>
+    <button class="glass" id="pt-me" title="My position"><svg class="i"><use href="#i-me"/></svg></button>
+    <button class="glass" id="pt-layer" title="Satellite / streets"><svg class="i"><use href="#i-layers"/></svg></button>
+    <button class="glass" id="pt-undo" title="Remove the last waypoint"><svg class="i"><use href="#i-undo"/></svg></button>
+    <button class="glass danger" id="pt-clear" title="Clear all waypoints"><svg class="i"><use href="#i-trash"/></svg></button>
+  </div>
+  <section id="plan">
+    <div class="ph"><h3>MISSION</h3><span id="p-count">0 waypoints</span></div>
+    <div class="params">
+      <div class="field"><div class="row"><span>ALTITUDE</span><b class="num"><span id="p-alt-v">30</span> m</b></div><input type="range" id="p-alt" min="5" max="120" step="1"></div>
+      <div class="steppers">
+        <div class="stepper" id="p-speed"><label>SPEED</label><div><button data-d="-1">−</button><b class="num">4</b><u>m/s</u><button data-d="1">+</button></div></div>
+        <div class="stepper" id="p-hover"><label>HOVER</label><div><button data-d="-1">−</button><b class="num">2</b><u>s</u><button data-d="1">+</button></div></div>
+      </div>
+    </div>
+    <div id="wplist"></div>
+    <div class="psum num" id="p-sum">0 m</div>
+    <div class="mstatus" id="p-status"><span id="p-msg"></span><div class="bar" id="p-bar"><i></i></div></div>
+    <button class="btn primary wide" id="p-fly"><svg class="i sm"><use href="#i-flag"/></svg>Upload &amp; fly mission</button>
+  </section>
+  <div id="flymission" class="mstatus"><span id="fm-msg"></span></div>
+
+  <div id="toasts"></div>
+
+  <div id="scrim"></div>
+  <section id="settings">
+    <div class="drawer-head"><h2>Settings</h2><button class="tb-btn" id="set-close"><svg class="i"><use href="#i-close"/></svg></button></div>
+    <div class="sect"><h4>VIRTUAL STICKS</h4>
+      <div class="item"><div>Show sticks<small>Left: climb / descend and turn. Right: forward / back and sideways. Centre holds altitude.</small></div><button class="toggle" data-key="sticks"></button></div>
+      <div class="item"><div>Stick mode</div><div class="seg" id="set-mode"><button data-v="2">Mode 2</button><button data-v="1">Mode 1</button></div></div>
+      <div class="item"><div>Sensitivity</div><div class="seg" id="set-sens"><button data-v="0.35">Low</button><button data-v="0.55">Mid</button><button data-v="0.7">High</button></div></div>
+      <div class="item"><div style="width:100%">Drone receives<small>The sticks the drone reports, from the remote and the app.</small>
+        <div class="rx"><div>ROLL<div class="meter"><i id="rx-roll"></i></div></div><div>PITCH<div class="meter"><i id="rx-pitch"></i></div></div>
+        <div>THR<div class="meter"><i id="rx-thr"></i></div></div><div>YAW<div class="meter"><i id="rx-yaw"></i></div></div></div></div></div>
+    </div>
+    <div class="sect"><h4>PHOTOS &amp; VIDEOS</h4>
+      <div class="item"><div>Saved in your Gallery<small>Photos: Pictures/Pindad UGV-UAV. Videos: Movies/Pindad UGV-UAV. The drone also keeps full-quality copies on its SD card.</small></div><button class="btn" id="set-open"><svg class="i sm"><use href="#i-image"/></svg>Open last</button></div>
+    </div>
+    <div class="sect"><h4>VIDEO</h4>
+      <div class="item"><div>Live video<small id="set-vinfo">From the drone camera, H.264 or H.265.</small></div><button class="toggle" data-key="video"></button></div>
+      <div class="item"><div>Fill the screen<small>Crop the edges instead of black bars.</small></div><button class="toggle" data-key="fill"></button></div>
+    </div>
+    <div class="sect"><h4>MAP</h4>
+      <div class="item"><div>Map style</div><div class="seg" id="set-layer"><button data-v="sat">Satellite</button><button data-v="street">Streets</button></div></div>
+    </div>
+    <div class="sect"><h4>UGV / PC LINK</h4>
+      <div class="item"><div>Link address<small class="kv" id="set-addr">-</small></div></div>
+      <div class="item"><div>PC control<small>The computer on the link sends the flight commands; the app stops sending its own.</small></div><button class="toggle" data-key="pcControl"></button></div>
+      <div class="item"><div>Send video to PC<small>Uses about 3.5 Mbit/s of Wi-Fi.</small></div><button class="toggle" data-key="pcVideo"></button></div>
+    </div>
+    <div class="sect"><h4>DRONE</h4>
+      <div class="item"><div>Flight controller<small class="kv" id="set-fc">-</small></div></div>
+      <div class="item"><div>Find my drone<small>Beeps the motors (only while they are stopped).</small></div><button class="btn" id="set-beep"><svg class="i sm"><use href="#i-bell"/></svg>Beep</button></div>
+      <div class="item"><div>Start motors<small>Same as the remote's stick combination. Propellers spin.</small></div><button class="btn" id="set-motors"><svg class="i sm"><use href="#i-prop"/></svg>Start</button></div>
+    </div>
+    <div class="sect"><h4>EVENT LOG</h4><div id="log"></div></div>
+    <div class="foot">Pindad UGV - UAV <span id="set-version"></span><br>Unplug the remote before closing the app.</div>
+  </section>
+
+  <div class="overlay" id="connect">
+    <div class="card">
+      <div class="ic"><svg class="i"><use href="#i-usb"/></svg></div>
+      <h2>Connect the remote</h2>
+      <p>The phone talks to the drone through the remote's USB cable.</p>
+      <div class="steps">
+        <div class="step" id="cs-1"><span class="n">1</span>Switch on the drone and the remote</div>
+        <div class="step" id="cs-2"><span class="n">2</span>Plug the remote into this phone</div>
+        <div class="step" id="cs-3"><span class="n">3</span>Tap Connect and allow access</div>
+      </div>
+      <div class="note" id="cn-note">For safety, unplug the remote and plug it in again now. The app only opens a remote that was plugged in while it is running.</div>
+      <div class="row-btns"><button class="btn primary" id="cn-connect">Connect</button></div>
+      <button class="linkbtn" id="cn-skip">Plan a mission without the drone</button>
+    </div>
+  </div>
+</div>
+<script src="leaflet/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

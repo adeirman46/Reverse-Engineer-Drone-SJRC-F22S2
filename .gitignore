@@ -1,0 +1,17 @@
+# build outputs
+build/
+android/.gradle/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+__pycache__/
+*.pyc
+# private or third-party files: never commit
+*.keystore
+*.jks
+captures/
+native/
+apk/
+jadx/
+android/screenshots/
