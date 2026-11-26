@@ -3,6 +3,8 @@ package com.ugvuav.gcs;
 import android.os.SystemClock;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -32,6 +34,8 @@ final class Telemetry {
     volatile int magInterference, batPct = -1, indoor = -1, remotePct = -1, magErr, magNeedCal,
             heightLimit, distLimit, oaWarn, oaDis, sport, autoMode, rtlStep, imuAccFlag, gpsQuality9C;
     volatile double batV;
+    /** Steady battery percentage for display (the drone's own number sags in flight). */
+    final BatteryEstimator battery = new BatteryEstimator();
     // 9D: position
     volatile double lat, lon, alt, hs, vs;
     volatile int dist;
@@ -46,6 +50,9 @@ final class Telemetry {
     volatile int waypointAck = -1;
     volatile int gimbalPos = -1, rcSignal;
     volatile long gimbalAt;
+    // flight limits as the drone confirmed them (message AB after a 68 1B setting, or 9A), metres
+    volatile int limAlt = -1, limDist = -1, limRth = -1;
+    volatile long limAt;  // uptime ms of the last confirmation, 0 = never
 
     // derived
     volatile double homeLat, homeLon;
@@ -69,6 +76,10 @@ final class Telemetry {
         streamLen = 0;
         relayReply = -1;
         gotVersion = false;
+        limAt = 0;  // the drone answers its limits again after each connection (the app re-sends them)
+        limAlt = limDist = limRth = -1;
+        // keep the battery estimate over a short reconnect, start again for a new battery
+        if (battery.staleFor(SystemClock.uptimeMillis(), 60000)) battery.reset();
     }
 
     /** Payload of one frame from the remote. */
@@ -121,16 +132,30 @@ final class Telemetry {
         switch (id) {
             case 0x8B: if (p.length >= 14) decode8B(p, now); break;
             case 0x9B: if (p.length >= 36) decode9B(p); break;
-            case 0x9C: if (p.length >= 12) decode9C(p); break;
+            case 0x9C: if (p.length >= 12) decode9C(p, now); break;
             case 0x9D: if (p.length >= 14) decode9D(p, now); break;
             case 0x9E: if (p.length >= 10) decode9E(p); break;
             case 0x84: if (p.length >= 1) waypointAck = p[0] & 0xFF; break;
+            case 0xAB:  // settings reply (convertHyABGetSetInfo): name, version, then u16 metres
+                if (p.length >= 30) {
+                    limAlt = Protocol.u16(p, 24);
+                    limDist = Protocol.u16(p, 26);
+                    limRth = Protocol.u16(p, 28);
+                    limAt = now;
+                }
+                break;
             case 0xFE:
             case 0x9A:
                 if (!gotVersion) {
                     gotVersion = true;
                     fcVersion = ascii(p, Math.min(p.length, 24));
                     link.log("Flight controller: " + fcVersion);
+                }
+                if (id == 0x9A && p.length >= 28) {  // older settings reply (convertSjHyGetSetInfo)
+                    limAlt = Protocol.bits(p, 192, 10);
+                    limDist = Protocol.bits(p, 202, 12);
+                    limRth = Protocol.bits(p, 214, 10);
+                    limAt = now;
                 }
                 break;
             case 0xBE: fcLog = ascii(p, p.length); break;
@@ -193,7 +218,7 @@ final class Telemetry {
         stYaw = p[27] & 0xFF;
     }
 
-    private void decode9C(byte[] p) {
+    private void decode9C(byte[] p, long now) {
         magInterference = Protocol.bits(p, 0, 10);
         batV = Protocol.bits(p, 10, 12) / 100.0;
         gpsQuality9C = Protocol.bits(p, 22, 10);
@@ -210,6 +235,50 @@ final class Telemetry {
         sport = Protocol.bits(p, 74, 1);
         autoMode = Protocol.bits(p, 78, 4);
         rtlStep = Protocol.bits(p, 82, 4);
+        battery.update(batPct, armed, lowBat, now);
+    }
+
+    /**
+     * Why the drone may refuse to start its motors, from its live status (empty = nothing known).
+     * Checks follow the official app's status messages (ControlHyActivity): compass interference
+     * above 150 on the ground means "move the drone or calibrate the compass".
+     */
+    List<String> blockers() {
+        List<String> r = new ArrayList<>();
+        if (!fresh()) return r;
+        if (forbidTakeoff == 1) {
+            r.add("The drone has a no-fly block (set by the official app). Clear it in Settings › Flight limits.");
+        }
+        if ((sensors & 0x01) == 0) r.add("Gyro not ready: keep the drone still on level ground.");
+        if ((sensors & 0x02) == 0) r.add("Barometer not ready.");
+        if ((sensors & 0x04) == 0) r.add("Compass not detected: restart the drone.");
+        // 8B byte 6 bits 5-7 are 1 when calibrated; 0 while a calibration started with the sticks runs
+        if ((sensors & 0xC0) != 0xC0) r.add("Compass calibration is running: finish it or restart the drone.");
+        if ((sensors & 0x20) == 0) r.add("Level calibration is running: keep the drone still on level ground.");
+        if (magErr == 1) {
+            r.add("Compass error: restart the drone, then calibrate the compass.");
+        } else if (magNeedCal == 1 || magInterference > 150) {
+            // The check is the drone's own; no command switches it off. Attitude mode does not hold position with
+            // GPS + compass (the manual's way out when GPS mode will not start); not yet confirmed for the compass.
+            String s = String.format(Locale.US, "Compass disturbed here (interference %d, normal below 150): carry"
+                    + " the drone a few metres away from metal, cars and reinforced concrete", magInterference);
+            s += indoor == 0
+                    ? ", or switch to attitude mode with the remote's GPS button (3 s) and steer it yourself (it drifts"
+                      + " with the wind)."
+                    : ".";
+            r.add(s + " If it stays, calibrate the compass in an open place.");
+        }
+        if (indoor == 0 && gpsFine == 0) {
+            r.add("GPS mode needs a GPS fix (" + gpsNum + " satellites): wait in the open, or switch to attitude"
+                    + " mode with the remote's GPS button (3 s).");
+        }
+        if (lowBat >= 1) {
+            double v = batV > 0 ? batV : batV8B;
+            r.add(String.format(Locale.US, "The drone reports low battery (%.2f V): charge or swap the battery.", v));
+        }
+        if (Math.abs(roll) > 25 || Math.abs(pitch) > 25) r.add("The drone is not level.");
+        if (tempOver == 1) r.add("The drone is overheating.");
+        return r;
     }
 
     private void decode9D(byte[] p, long now) {
@@ -271,7 +340,9 @@ final class Telemetry {
         num(sb, "hs", hs);
         num(sb, "vs", vs);
         num(sb, "batV", batV > 0 ? batV : batV8B);
-        num(sb, "batPct", batPct);
+        num(sb, "batPct", battery.percent());
+        num(sb, "batRaw", battery.raw());
+        num(sb, "batSag", battery.sag());
         num(sb, "lowBat", lowBat);
         num(sb, "remotePct", remotePct);
         num(sb, "magInt", magInterference);
@@ -327,7 +398,14 @@ final class Telemetry {
     }
 
     static void str(StringBuilder sb, String k, String v) {
-        sb.append('"').append(k).append("\":\"");
+        sb.append('"').append(k).append("\":");
+        quote(sb, v);
+        sb.append(',');
+    }
+
+    /** A JSON string value. */
+    static void quote(StringBuilder sb, String v) {
+        sb.append('"');
         if (v != null) {
             for (int i = 0; i < v.length(); i++) {
                 char c = v.charAt(i);
@@ -336,7 +414,7 @@ final class Telemetry {
                 else sb.append(c);
             }
         }
-        sb.append("\",");
+        sb.append('"');
     }
 
     static String text(byte[] b) {

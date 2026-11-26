@@ -2,6 +2,7 @@ package com.ugvuav.gcs;
 
 import android.os.SystemClock;
 
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -23,6 +24,24 @@ final class Flight {
     private Thread thread;
 
     volatile String handshake = "idle";
+
+    // Messages for the pilot that arrive after the command returned (the interface shows a toast).
+    volatile String alertText = "", alertKind = "";
+    volatile int alertSeq;
+
+    // Flight limits (68 1B 0A): the pilot's values, re-sent after every connection like the official app.
+    static final int LIM_ALT_MIN = 10, LIM_ALT_MAX = 5000, LIM_DIST_MIN = 20, LIM_DIST_MAX = 10000,
+            LIM_RTH_MIN = 20, LIM_RTH_MAX = 120;
+    // Missions: the manual and the official app allow 16 waypoints. The drone turns home when it reaches its distance
+    // limit, so every waypoint stays a little inside it; 1500 m while the limit is unknown.
+    static final int MISSION_MAX_POINTS = 16, MISSION_LIMIT_MARGIN_M = 30, DEFAULT_DIST_LIMIT = 1500;
+    volatile int[] savedLimits;             // alt, dist, rth in metres, or null (never set from this app)
+    volatile String limitsState = "idle";   // idle, sending, ok, no-reply
+    volatile String limitsMessage = "";
+    private int[] limitsWant;
+    private int limitsTries;
+    private long limitsNext, limitsSentAt;
+    private boolean autoLimitsPending;
 
     // waypoint mission
     volatile String missionState = "idle";  // idle, uploading, running, failed, cancelled
@@ -64,6 +83,7 @@ final class Flight {
     }
 
     private void run() {
+        autoLimitsPending = true;
         handshake();
         long next = SystemClock.uptimeMillis();
         while (link.isConnected()) {
@@ -102,7 +122,9 @@ final class Flight {
         long now = SystemClock.uptimeMillis();
         missionTick(now);
         takeoffTick(now);
+        armTick(now);
         if (link.allowPcCommands) return;  // the PC is sending flight messages itself
+        limitsTick(now);
         int[] c;
         int[] x;
         synchronized (this) {
@@ -149,6 +171,8 @@ final class Flight {
     }
 
     private long takeoffAt, takeoffDeadline;  // two-step take-off in progress (0 = none)
+    private long armDeadline;                 // "start motors" sent: check that they started
+    private long noFlyCheckAt;                // no-fly block toggle sent: check the result
     private int gimbalTarget;                 // last gimbal position sent
     private long gimbalSentAt;
     private int yawHoldValue = 128;
@@ -161,7 +185,7 @@ final class Flight {
             takeoffDeadline = 0;
         } else if (now > takeoffDeadline) {
             takeoffDeadline = 0;
-            link.log("Take off: the motors did not start (GPS mode needs a GPS fix).");
+            alert(notStarted("Take off"), "bad");
         } else if (tel.armed == 1) {
             if (takeoffAt == 0) {
                 takeoffAt = now + 1500;
@@ -171,6 +195,39 @@ final class Flight {
                 link.log("Take off: sent.");
             }
         }
+    }
+
+    private synchronized void armTick(long now) {
+        if (armDeadline != 0) {
+            if (tel.armed != 0) {
+                armDeadline = 0;
+            } else if (now > armDeadline) {
+                armDeadline = 0;
+                alert(notStarted("Start motors"), "bad");
+            }
+        }
+        if (noFlyCheckAt != 0 && now > noFlyCheckAt) {
+            noFlyCheckAt = 0;
+            if (tel.forbidTakeoff == 0) alert("No-fly block cleared.", "ok");
+            else alert("The no-fly block is still set. Restart the drone and try again.", "bad");
+        }
+    }
+
+    /** The drone did not start its motors: say why, from its own status flags. */
+    private String notStarted(String what) {
+        List<String> why = tel.blockers();
+        if (why.isEmpty()) {
+            return what + ": the motors did not start and the drone reports no reason. Try again, or start"
+                    + " them with the remote's sticks (both down and outward).";
+        }
+        return what + ": the motors did not start. " + String.join(" ", why);
+    }
+
+    void alert(String text, String kind) {
+        alertText = text;
+        alertKind = kind;
+        alertSeq++;
+        link.log(text);
     }
 
     private synchronized void hold(int field, int value, long ms) {
@@ -199,6 +256,7 @@ final class Flight {
             case "unlock":
                 if (armed != 0) return "The motors are already running.";
                 hold(Protocol.LOCK_UNLOCK, 1, 1000);
+                synchronized (this) { armDeadline = SystemClock.uptimeMillis() + 7000; }
                 return ok("Start motors");
             case "takeoff":
                 if (armed == 2) return "Already flying.";
@@ -262,6 +320,16 @@ final class Flight {
                     yawHoldUntil = SystemClock.uptimeMillis() + 450;  // the interface repeats while held
                 }
                 return null;
+            case "clearNoFly":
+                // The official app toggles the drone's take-off block with a 1 s pulse of the extend
+                // bit ForbidTakeOff: once when its no-fly-zone list says "inside", once more to clear
+                // it outside (ControlHyActivity.onNoFlyZonePopup). This app has no such list and never
+                // sets it; this clears a block the official app left on the drone.
+                if (armed != 0) return "Only with the motors stopped.";
+                if (tel.forbidTakeoff != 1) return "The drone has no no-fly block.";
+                holdExtend(Protocol.X_FORBID_TAKEOFF, 1000);
+                synchronized (this) { noFlyCheckAt = SystemClock.uptimeMillis() + 4000; }
+                return ok("Clear the no-fly block");
             case "beep":
                 if (armed != 0) return "Only with the motors stopped.";
                 holdExtend(Protocol.X_MOTOR_BEEP, 1000);
@@ -307,15 +375,27 @@ final class Flight {
         if (tel.indoor == 1) return "Switch the drone to GPS mode first.";
         if (tel.gpsFine == 0 || !tel.hasFix) return "Waiting for a GPS fix.";
         if (points == null || points.length < 1) return "Add at least one waypoint.";
-        if (points.length > 32) return "At most 32 waypoints.";
-        if (altM < 5 || altM > 120) return "Altitude must be 5 to 120 m.";
+        if (points.length > MISSION_MAX_POINTS) return "At most 16 waypoints (the drone's manual allows 16).";
+        if (altM < 5 || altM > Protocol.WAYPOINT_MAX_ALT_M) {
+            return "Altitude must be 5 to 409 m (the most a waypoint message can carry).";
+        }
+        if (tel.limAt != 0 && tel.limAlt > 0 && altM > tel.limAlt) {
+            return "The drone's max altitude is " + tel.limAlt + " m. Raise it in Settings › Flight limits.";
+        }
         if (speed < 1 || speed > 10) return "Speed must be 1 to 10 m/s.";
         if (hover < 0 || hover > 60) return "Hover time must be 0 to 60 s.";
         if ("uploading".equals(missionState)) return "A mission is already uploading.";
+        // The drone measures its distance limit from home (the take-off point).
+        int maxDist = missionDistanceLimit();
+        boolean fromHome = tel.hasHome;
+        double refLat = fromHome ? tel.homeLat : tel.lat, refLon = fromHome ? tel.homeLon : tel.lon;
         for (int i = 0; i < points.length; i++) {
-            double d = distance(tel.lat, tel.lon, points[i][0], points[i][1]);
-            if (Double.isNaN(d) || d > 1500) {
-                return String.format(Locale.US, "Waypoint %d is %.0f m away (limit 1500 m).", i + 1, d);
+            double d = distance(refLat, refLon, points[i][0], points[i][1]);
+            if (Double.isNaN(d) || d > maxDist - MISSION_LIMIT_MARGIN_M) {
+                return String.format(Locale.US, "Waypoint %d is %s from %s, but the drone's distance limit is %s"
+                        + " (waypoints must stay %d m inside it). Raise Max distance in Settings › Flight limits"
+                        + " (up to 10 km).", i + 1, fmtDist(d), fromHome ? "home" : "the drone", fmtDist(maxDist),
+                        MISSION_LIMIT_MARGIN_M);
             }
         }
         missionPoints = points;
@@ -391,6 +471,77 @@ final class Flight {
         }
     }
 
+    // ---------------- flight limits ----------------
+
+    /** Sends the drone's flight limits; returns null when sending started, else the reason it did not. */
+    synchronized String setLimits(int alt, int dist, int rth) {
+        if (!link.isConnected()) return "The remote is not connected.";
+        if (link.allowPcCommands) return "PC control is on (Settings).";
+        if (!tel.fresh()) return "No live data from the drone.";
+        if (alt < LIM_ALT_MIN || alt > LIM_ALT_MAX) return "Max altitude must be 10 to 5000 m.";
+        if (dist < LIM_DIST_MIN || dist > LIM_DIST_MAX) return "Max distance must be 20 to 10000 m.";
+        if (rth < LIM_RTH_MIN || rth > LIM_RTH_MAX) return "Return-home altitude must be 20 to 120 m.";
+        if (rth > alt) return "The return-home altitude cannot be above the max altitude.";
+        if (tel.armed == 2) {
+            if (alt < tel.alt + 5) {
+                return String.format(Locale.US, "The drone is at %.0f m: set the max altitude above that, or land first.", tel.alt);
+            }
+            if (dist < tel.dist + 10) {
+                return String.format(Locale.US, "The drone is %d m away: set the max distance above that, or land first.", tel.dist);
+            }
+        }
+        limitsWant = new int[]{alt, dist, rth};
+        limitsTries = 0;
+        limitsNext = 0;
+        limitsSentAt = SystemClock.uptimeMillis();
+        limitsState = "sending";
+        limitsMessage = "Sending the limits to the drone...";
+        link.log(String.format(Locale.US, "Flight limits: sending max altitude %d m, max distance %d m,"
+                + " return altitude %d m.", alt, dist, rth));
+        return null;
+    }
+
+    private void limitsTick(long now) {
+        if (autoLimitsPending && ("ok".equals(handshake) || "no-reply".equals(handshake))) {
+            int[] s = savedLimits;
+            if (s == null) {
+                autoLimitsPending = false;
+            } else if (tel.fresh()) {
+                autoLimitsPending = false;
+                String r = setLimits(s[0], s[1], s[2]);
+                if (r != null) link.log("Flight limits not re-applied: " + r);
+            }
+        }
+        if (!"sending".equals(limitsState)) return;
+        int[] w;
+        synchronized (this) { w = limitsWant; }
+        if (tel.limAt > limitsSentAt) {
+            int a = tel.limAlt, d = tel.limDist, r = tel.limRth;
+            limitsState = "ok";
+            if (a == w[0] && d == w[1] && r == w[2]) {
+                limitsMessage = String.format(Locale.US, "The drone confirmed: max altitude %d m, max distance %d m,"
+                        + " return altitude %d m.", a, d, r);
+                link.log("Flight limits: " + limitsMessage);
+            } else {
+                limitsMessage = String.format(Locale.US, "The drone answered max altitude %d m, max distance %d m,"
+                        + " return altitude %d m (asked for %d, %d and %d m): it keeps its own maximum.",
+                        a, d, r, w[0], w[1], w[2]);
+                alert("Flight limits: " + limitsMessage, "bad");
+            }
+            return;
+        }
+        if (now < limitsNext) return;
+        if (limitsTries >= 5) {
+            limitsState = "no-reply";
+            limitsMessage = "The drone did not confirm the limits. Is it switched on?";
+            alert("Flight limits: " + limitsMessage, "bad");
+            return;
+        }
+        link.sendDrone(Protocol.flightLimits(w[0], w[1], w[2]));
+        limitsTries++;
+        limitsNext = now + 2000;
+    }
+
     void appendJson(StringBuilder sb) {
         sb.append("\"mission\":{");
         Telemetry.str(sb, "state", missionState);
@@ -402,8 +553,45 @@ final class Flight {
         Telemetry.num(sb, "rec", recording ? 1 : 0);
         Telemetry.num(sb, "recS", recording ? (SystemClock.uptimeMillis() - recordStart) / 1000.0 : 0);
         sb.setLength(sb.length() - 1);
-        sb.append("},");
+        sb.append("},\"limits\":{");
+        Telemetry.str(sb, "state", limitsState);
+        Telemetry.str(sb, "msg", limitsMessage);
+        int[] sv = savedLimits;
+        if (sv != null) {
+            Telemetry.num(sb, "alt", sv[0]);
+            Telemetry.num(sb, "dist", sv[1]);
+            Telemetry.num(sb, "rth", sv[2]);
+        }
+        if (tel.limAt != 0) {
+            Telemetry.num(sb, "dAlt", tel.limAlt);
+            Telemetry.num(sb, "dDist", tel.limDist);
+            Telemetry.num(sb, "dRth", tel.limRth);
+        }
+        sb.setLength(sb.length() - 1);
+        sb.append("},\"alert\":{");
+        Telemetry.num(sb, "seq", alertSeq);
+        Telemetry.str(sb, "text", alertText);
+        Telemetry.str(sb, "kind", alertKind);
+        sb.setLength(sb.length() - 1);
+        sb.append("},\"blockers\":[");
+        List<String> b = tel.blockers();
+        for (int i = 0; i < b.size(); i++) {
+            if (i > 0) sb.append(',');
+            Telemetry.quote(sb, b.get(i));
+        }
+        sb.append("],");
         Telemetry.str(sb, "handshake", handshake);
+    }
+
+    /** The distance limit missions must stay inside: the drone's confirmed one, else the one set here, else 1500 m. */
+    int missionDistanceLimit() {
+        if (tel.limAt != 0 && tel.limDist > 0) return tel.limDist;
+        int[] lim = savedLimits;
+        return lim != null ? lim[1] : DEFAULT_DIST_LIMIT;
+    }
+
+    static String fmtDist(double m) {
+        return m < 1000 ? String.format(Locale.US, "%.0f m", m) : String.format(Locale.US, "%.2f km", m / 1000);
     }
 
     static double distance(double lat1, double lon1, double lat2, double lon2) {

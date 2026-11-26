@@ -2,8 +2,8 @@
  * Talks to the app through window.Android (MainActivity.Api); state() is polled 10 times a second.
  * In a desktop browser it runs a demo with simulated data. Preview switches (query string):
  *   ?demo=connect|replug|plugged  ?armed=0|1|2  ?indoor=1  ?warn=1  ?rec=1  ?novideo=1
- *   ?main=map  ?view=plan  ?plan=demo  ?mission=uploading|running|failed  ?panel=settings
- *   ?confirm=fly|rth|motors|mission  ?menu=1  ?touch=1  ?sticks=0 */
+ *   ?main=map  ?view=plan  ?plan=demo|long  ?mission=uploading|running|failed  ?panel=settings
+ *   ?confirm=fly|rth|motors|mission|limits|nofly  ?menu=1  ?touch=1  ?sticks=0  ?nofly=1  ?alert=1 */
 'use strict';
 (function () {
   const $ = (s, el) => (el || document).querySelector(s);
@@ -44,14 +44,16 @@
     return 2 * r * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
   }
   function haptic() { try { api.haptic(); } catch (e) { /* not available */ } }
-  function toast(msg, kind) {
+  function toast(msg, kind, ms) {
     const box = $('#toasts');
     const t = document.createElement('div');
     t.className = 'toast ' + (kind || '');
     t.textContent = msg;
     box.appendChild(t);
     while (box.children.length > 3) box.firstChild.remove();
-    setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 300); }, kind === 'bad' ? 4000 : 2400);
+    // long explanations stay longer: about 15 characters per second of reading
+    const life = ms || Math.max(kind === 'bad' ? 4000 : 2400, Math.min(15000, msg.length * 65));
+    setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 300); }, life);
   }
   /** Sends a command; shows the reason when the app refuses it. */
   function run(name, okMsg) {
@@ -96,6 +98,8 @@
   function confirmAction(o) {
     $('#cf-title').textContent = o.title;
     $('#cf-text').textContent = o.text;
+    $('#cf-warn').textContent = o.warn || '';
+    $('#cf-warn').hidden = !o.warn;
     const ic = $('#cf-icon');
     ic.className = 'cf-ic ' + (o.kind === 'ok' ? '' : o.kind);
     ic.innerHTML = icon(o.icon);
@@ -110,12 +114,18 @@
   $('#cf-cancel').onclick = closeConfirm;
 
   // ---------------- flight actions ----------------
+  /** What the drone reports that may stop it from starting its motors (from the app). */
+  function blockerText() {
+    const b = (S && S.blockers) || [];
+    return b.length ? 'The drone may refuse to start: ' + b.join(' ') : '';
+  }
   function actMotors() {
     if (!ready(true)) return;
     if (S.d.armed !== 0) { toast('The motors are already running. To stop them on the ground, hold the remote\'s left stick down for 2 s.'); return; }
     confirmAction({
       title: 'Start the motors?', icon: 'i-prop', kind: 'warn', label: 'Slide to start motors',
       text: 'The propellers spin. Keep people and hands clear. The drone stays on the ground until you climb or take off.',
+      warn: blockerText(),
       action: () => run('unlock', 'Start motors sent')
     });
   }
@@ -129,6 +139,7 @@
       confirmAction({ title: 'Take off?', icon: 'i-takeoff', kind: 'ok', label: 'Slide to take off',
         text: (d.armed === 0 ? 'Starts the motors, then takes off, ' : 'Takes off, ') + 'climbs a little and hovers. ' +
           (d.indoor === 1 ? 'Attitude mode: it does not hold position against wind.' : 'GPS mode: it holds its position.'),
+        warn: d.armed === 0 ? blockerText() : '',
         action: () => run('takeoff', 'Take off sent') });
     }
   }
@@ -477,7 +488,7 @@
     if (!ll || !ready(true)) { hideMenu(); return; }
     const why = missionReason(S.d);
     if (why) { toast(why, 'bad'); hideMenu(); return; }
-    const alt = Math.max(5, Math.min(120, Math.round(S.d.alt || 0)));
+    const alt = Math.max(5, Math.min(altCap(S), Math.round(S.d.alt || 0)));
     const d = haversine([S.d.lat, S.d.lon], [ll.lat, ll.lng]);
     confirmAction({ title: 'Fly to this point?', icon: 'i-flag', kind: 'warn', label: 'Slide to fly there',
       text: `${fmtDist(d)} away, at the current altitude (${alt} m), ${plan.speed} m/s. Tap Stop to end it at any time.`,
@@ -583,10 +594,15 @@
   });
 
   // ---------------- mission plan ----------------
+  // The manual and the official app allow 16 waypoints. The drone turns home when it reaches its distance limit
+  // (measured from home), so waypoints stay 30 m inside it. The remote reaches about 6 km in open country;
+  // when the drone loses it, it flies home on its own. A full battery gives roughly 25 min of real flight
+  // (the manual says 40 min); 20 % is kept for the drone's own low-battery return.
+  const MAX_WAYPOINTS = 16, LIMIT_MARGIN = 30, DEFAULT_DIST_LIMIT = 1500, RADIO_RANGE = 6000, FULL_FLIGHT_MIN = 25;
   const plan = { pts: store.get('plan', []), alt: store.get('plan.alt', 30), speed: store.get('plan.speed', 4), hover: store.get('plan.hover', 2), sel: -1, markers: [] };
   function savePlan() { store.set('plan', plan.pts); store.set('plan.alt', plan.alt); store.set('plan.speed', plan.speed); store.set('plan.hover', plan.hover); }
   function addWaypoint(ll) {
-    if (plan.pts.length >= 32) { toast('At most 32 waypoints.', 'bad'); return; }
+    if (plan.pts.length >= MAX_WAYPOINTS) { toast('At most 16 waypoints (the drone\'s manual allows 16).', 'bad'); return; }
     plan.pts.push([+ll.lat.toFixed(7), +ll.lng.toFixed(7)]);
     plan.sel = -1;
     haptic();
@@ -627,14 +643,39 @@
     const st = planStart();
     return plan.pts.map((p, i) => (i === 0 ? (st ? haversine(st, p) : 0) : haversine(plan.pts[i - 1], p)));
   }
+  /** Where the drone measures its distance limit from: home, else its position. */
+  function planHome() {
+    if (S && S.home) return [S.home.lat, S.home.lon];
+    if (S && S.d.hasFix) return [S.d.lat, S.d.lon];
+    return null;
+  }
+  /** Distance limit missions must stay inside: the drone's confirmed one, else the one set here, else 1500 m. */
+  function distCap(s) {
+    const l = (s && s.limits) || {};
+    return l.dDist > 0 ? l.dDist : l.dist > 0 ? l.dist : DEFAULT_DIST_LIMIT;
+  }
+  /** Rough minutes of flight left before the drone's own low-battery return, or null. */
+  function flightMinutesLeft(d) {
+    return d && isNum(d.batPct) && d.batPct >= 0 ? Math.max(0, (d.batPct - 20) / 80 * FULL_FLIGHT_MIN) : null;
+  }
+  function missionStats() {
+    const n = plan.pts.length, lg = legs(), home = planHome();
+    const path = lg.reduce((a, b) => a + b, 0);
+    const back = home && n ? haversine(plan.pts[n - 1], home) : 0;
+    let far = 0, farAt = 0;
+    if (home) plan.pts.forEach((p, i) => { const d = haversine(home, p); if (d > far) { far = d; farAt = i; } });
+    return { n, lg, path, back, far, farAt, secs: n ? (path + back) / plan.speed + plan.hover * n : 0, cap: distCap(S) };
+  }
+  const fmtMin = s => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+  let planKey = '';
   function updatePlanInfo() {
-    const n = plan.pts.length, lg = legs();
-    const total = lg.reduce((a, b) => a + b, 0);
+    const m = missionStats(), n = m.n, lg = m.lg;
     setText($('#p-count'), n === 1 ? '1 waypoint' : `${n} waypoints`);
-    const t = n ? total / plan.speed + plan.hover * n : 0;
-    const st = planStart();
-    const far = st && n ? Math.max(...plan.pts.map(p => haversine(st, p))) : 0;
-    setText($('#p-sum'), `${fmtDist(total)}  ·  ${Math.floor(t / 60)}:${String(Math.round(t % 60)).padStart(2, '0')} min  ·  max ${fmtDist(far)} away`);
+    const left = flightMinutesLeft(S && S.d), nb = t => t.replace(/ /g, ' ');
+    const why = !n ? '' : m.far > m.cap - LIMIT_MARGIN ? 'beyond the limit' : left !== null && m.secs / 60 > left ? 'battery may not last' : '';
+    setText($('#p-sum'), `${nb(fmtDist(m.path + m.back))} with the way home  ·  ${fmtMin(m.secs)} min  ·  farthest ` +
+      `${nb(fmtDist(m.far))} (limit ${nb(fmtDist(m.cap))})` + (why ? `  ·  ${why}` : ''));
+    setClass($('#p-sum'), 'bad', !!why);
     $('#wplist').innerHTML = n ? plan.pts.map((p, i) =>
       `<div class="wp${i === plan.sel ? ' sel' : ''}" data-i="${i}"><span class="n">${i + 1}</span><span class="d num">${i === 0 ? 'from start' : 'leg'} ${fmtDist(lg[i])}</span>` +
       `<button data-del="${i}" title="Delete">${icon('i-close').replace('class="i"', 'class="i sm"')}</button></div>`).join('')
@@ -662,6 +703,21 @@
     el.addEventListener('input', () => { plan[key] = +el.value; show(); updatePlanInfo(); savePlan(); });
   }
   bindRange('#p-alt', 'alt');
+  /** Highest mission altitude: the drone's max altitude (as confirmed or as set here, else the usual
+   *  120 m), and never above 409 m, the most the waypoint message can carry. */
+  function altCap(s) {
+    const l = (s && s.limits) || {};
+    const lim = l.dAlt > 0 ? l.dAlt : l.alt > 0 ? l.alt : 120;
+    return Math.max(5, Math.min(409, lim));
+  }
+  function setAltMax(max) {
+    const el = $('#p-alt');
+    if (+el.max === max) return;
+    el.max = max;
+    if (plan.alt > max) { plan.alt = max; savePlan(); }
+    el.value = plan.alt;
+    el.dispatchEvent(new Event('input'));
+  }
   function bindStepper(id, key, min, max) {
     const box = $(id), val = $('b', box);
     const show = () => setText(val, String(plan[key]));
@@ -695,9 +751,22 @@
     if (!ready(true)) return;
     const why = missionReason(S.d);
     if (why) { toast(why, 'bad'); return; }
-    const n = plan.pts.length, total = legs().reduce((a, b) => a + b, 0);
-    confirmAction({ title: `Fly ${n} waypoint${n > 1 ? 's' : ''}?`, icon: 'i-flag', kind: 'warn', label: 'Slide to start the mission',
-      text: `At ${plan.alt} m and ${plan.speed} m/s, ${fmtDist(total)} in total. Tap Stop at any time to end it and fly yourself.`,
+    const m = missionStats(), n = m.n;
+    if (m.far > m.cap - LIMIT_MARGIN) {
+      toast(`Waypoint ${m.farAt + 1} is ${fmtDist(m.far)} from home, but the drone's distance limit is ${fmtDist(m.cap)} ` +
+        `(waypoints must stay ${LIMIT_MARGIN} m inside it). Raise Max distance in Settings › Flight limits (up to 10 km).`, 'bad');
+      return;
+    }
+    const warns = [], left = flightMinutesLeft(S.d), need = m.secs / 60;
+    if (left !== null && need > left) {
+      warns.push(`It needs about ${Math.ceil(need)} min with the way home, but the battery (${S.d.batPct} %) has roughly ` +
+        `${Math.floor(left)} min left: the drone turns home on its own when the battery gets low.`);
+    }
+    if (m.far > RADIO_RANGE) warns.push('Beyond about 6 km the remote loses the drone; it then flies home on its own.');
+    if (plan.speed > 4 && m.far > 1000) warns.push('The official app always flies missions at 4 m/s; faster is not yet tested on this drone: watch its speed.');
+    confirmAction({ title: `Fly ${n} waypoint${n > 1 ? 's' : ''}?`, icon: 'i-flag', kind: warns.length ? 'bad' : 'warn', label: 'Slide to start the mission',
+      text: `At ${plan.alt} m and ${plan.speed} m/s: ${fmtDist(m.path)} along the waypoints, then ${fmtDist(m.back)} back home, about ${fmtMin(m.secs)} min. Tap Stop at any time to end it and fly yourself.`,
+      warn: warns.join(' '),
       action: () => sendMission(plan.pts, plan.alt, plan.speed, plan.hover) });
   };
   function renderMission(s) {
@@ -723,6 +792,7 @@
     setText($('#set-addr'), `${c.addresses || '-'}  ·  TCP port ${c.port || 9000}`);
     setText($('#set-version'), c.version ? 'v' + c.version : '');
     lastLogV = -1;
+    fillLimits();
     $('#settings').classList.add('show');
     $('#scrim').classList.add('show');
   }
@@ -752,6 +822,83 @@
   bindSeg('#set-mode', 'mode', Number, () => { store.set('stickMode', cfg.mode); labelSticks(); });
   bindSeg('#set-sens', 'sens', Number, () => store.set('stickSens', cfg.sens));
   $('#set-beep').onclick = () => run('beep', 'Beeping');
+
+  // ---------------- flight limits (sent to the drone, kept, re-sent after each connection) ----------------
+  const LIM = {
+    alt: { el: '#lim-alt', min: 10, max: 5000, def: 120, step: v => (v < 200 ? 10 : v < 1000 ? 50 : 100) },
+    dist: { el: '#lim-dist', min: 20, max: 10000, def: 1500, step: v => (v < 1000 ? 50 : v < 5000 ? 100 : 500) },
+    rth: { el: '#lim-rth', min: 20, max: 120, def: 30, step: () => 5 }
+  };
+  const limIn = k => $('input', $(LIM[k].el));
+  function limVal(k) {
+    const v = Math.round(+limIn(k).value);
+    return isFinite(v) ? v : LIM[k].def;
+  }
+  function limShow(k, v) {
+    const L = LIM[k];
+    v = Math.max(L.min, Math.min(L.max, Math.round(v)));
+    limIn(k).value = v;
+    setClass($(L.el), 'high', (k === 'alt' && v > 120) || (k === 'dist' && v > RADIO_RANGE));
+  }
+  Object.keys(LIM).forEach(k => {
+    const L = LIM[k];
+    $$('button', $(L.el)).forEach(b => {
+      b.onclick = () => {
+        const v = limVal(k), d = +b.dataset.d, st = L.step(d > 0 ? v : v - 1);
+        limShow(k, d > 0 ? Math.floor(v / st) * st + st : Math.ceil(v / st) * st - st);
+        haptic();
+      };
+    });
+    limIn(k).addEventListener('change', () => limShow(k, limVal(k)));
+  });
+  /** Fills the three fields from the limits kept in the app (or the drone's answer), once per opening. */
+  function fillLimits() {
+    const l = (S && S.limits) || {};
+    limShow('alt', l.alt || l.dAlt || LIM.alt.def);
+    limShow('dist', l.dist || l.dDist || LIM.dist.def);
+    limShow('rth', l.rth || l.dRth || LIM.rth.def);
+  }
+  function renderLimits(s) {
+    const l = s.limits || {}, st = $('#lim-status');
+    let t, c = '';
+    if (l.state === 'sending') { t = 'Sending to the drone…'; c = 'busy'; }
+    else if (l.state === 'ok' || l.state === 'no-reply') { t = l.msg; c = l.state === 'ok' && !/answered/.test(l.msg) ? 'ok' : 'bad'; }
+    else if (l.dAlt > 0) t = `The drone uses max altitude ${l.dAlt} m, max distance ${l.dDist} m, return altitude ${l.dRth} m.`;
+    else if (l.alt > 0) t = `Kept in this app: ${l.alt} m, ${l.dist} m, return ${l.rth} m. Sent to the drone after each connection.`;
+    else t = 'Not set from this app yet: the drone keeps the limits it has (from the official app, normally 120 m).';
+    setText(st, t);
+    st.className = 'limstat ' + c;
+    const forbid = s.link.connected && s.d.fresh && s.d.forbid === 1;
+    setText($('#nfz-text'), forbid
+      ? 'The drone has a take-off block set by the official app for a no-fly zone. It refuses to start until cleared.'
+      : 'None in this app: it has no no-fly-zone list and never sends one to the drone.');
+    $('#nfz-clear').hidden = !forbid;
+    setClass($('.item.nfz'), 'on', forbid);
+  }
+  $('#lim-apply').onclick = () => {
+    if (!ready(true)) return;
+    ['alt', 'dist', 'rth'].forEach(k => limShow(k, limVal(k)));
+    const alt = limVal('alt'), dist = limVal('dist'), rth = limVal('rth');
+    if (rth > alt) { toast('The return-home altitude cannot be above the max altitude.', 'bad'); return; }
+    const warns = [];
+    if (alt > 120) warns.push('Above 120 m: most countries limit drones to 120 m and keep them away from airports. The battery and the remote\'s range decide how high it can really go and still come back. Missions fly at most 409 m high.');
+    if (dist > RADIO_RANGE) warns.push('Beyond about 6 km the remote loses the drone (its range in open country); the drone then flies home on its own.');
+    confirmAction({ title: 'Set the flight limits?', icon: 'i-warn', kind: warns.length ? 'bad' : 'warn', label: 'Slide to set the limits',
+      text: `Max altitude ${alt} m, max distance ${fmtDist(dist)}, return-home altitude ${rth} m. The drone answers with the limits it accepts.`,
+      warn: warns.join(' '),
+      action: () => {
+        let r = '';
+        try { r = api.limits(JSON.stringify({ alt, dist, rth })) || ''; } catch (e) { r = String(e); }
+        if (r) toast(r, 'bad'); else toast('Sending the limits to the drone…', 'ok');
+      } });
+  };
+  $('#nfz-clear').onclick = () => {
+    if (!ready(true)) return;
+    confirmAction({ title: 'Clear the no-fly block?', icon: 'i-warn', kind: 'bad', label: 'Slide to clear the block',
+      text: 'The official app blocks take-off where its no-fly-zone list says flying is not allowed. This sends the same signal it uses to lift the block.',
+      warn: 'You are responsible for staying out of restricted airspace: airports, military and government areas.',
+      action: () => run('clearNoFly', 'Clearing the no-fly block…') });
+  };
   function meter(id, v) {
     const el = $(id);
     const f = isNum(v) ? (v - 127) / 127 : 0;
@@ -788,17 +935,20 @@
     if (!s.link.connected) return w;
     if (s.link.pcControl) w.push(['PC control is on', 'warn']);
     if (!d.fresh) { w.push(['No signal from the drone', 'bad']); return w; }
-    if (d.lowBat >= 2) w.push(['Battery critical: land now', 'bad']); else if (d.lowBat === 1) w.push(['Low battery', 'warn']);
+    if (d.lowBat === 3) w.push(['Battery protection: forced landing', 'bad']);
+    else if (d.lowBat === 2) w.push([d.armed === 2 ? 'Battery low: returning home' : 'Battery very low', 'bad']);
+    else if (d.lowBat === 1) w.push(['Low battery (drone)', 'warn']);
     if (d.emergRth > 0 && d.emergRth < 255) w.push([`Emergency return home in ${d.emergRth} s`, 'bad']);
     if (d.lowRth > 0 && d.lowRth < 255) w.push([`Low battery: returning home in ${d.lowRth} s`, 'bad']);
     if (d.oaWarn) w.push(['Obstacle ahead', 'bad']);
     if (d.tempOver) w.push(['Overheating', 'bad']);
     if (d.currOver) w.push(['Motor overload', 'bad']);
     if (d.gale) w.push(['Strong wind', 'warn']);
-    if (d.magCal || d.magErr) w.push(['Compass needs calibration', 'warn']);
+    if (d.magErr) w.push(['Compass error', 'bad']);
+    else if (d.magCal || d.magInt > (d.armed === 2 ? 300 : 150)) w.push([d.armed === 2 ? 'Magnetic interference' : 'Compass disturbed: move the drone', 'warn']);
     if (d.hLimit) w.push(['Height limit reached', 'warn']);
     if (d.dLimit) w.push(['Distance limit reached', 'warn']);
-    if (d.forbid) w.push(['Take-off not allowed here', 'warn']);
+    if (d.forbid) w.push(['No-fly block (Settings)', 'bad']);
     if (d.indoor === 0 && !d.gpsFine && d.armed !== 2) w.push([`Waiting for GPS (${d.gpsNum} satellites)`, 'warn']);
     if (d.remotePct >= 0 && d.remotePct < 20) w.push([`Remote battery ${d.remotePct}%`, 'warn']);
     return w;
@@ -808,6 +958,17 @@
     if (key === lastWarnKey) return;
     lastWarnKey = key;
     $('#warnings').innerHTML = w.map(([t, k]) => `<div class="chip ${k === 'bad' ? 'bad' : ''}"><svg class="i"><use href="#i-warn"/></svg>${t}</div>`).join('');
+  }
+
+  // Messages from the app that come later than the command (e.g. why the motors did not start).
+  let lastAlertSeq = null;
+  function renderAlert(s) {
+    const a = s.alert;
+    if (!a) return;
+    if (lastAlertSeq === null || a.seq < lastAlertSeq) { lastAlertSeq = a.seq; return; }
+    if (a.seq === lastAlertSeq) return;
+    lastAlertSeq = a.seq;
+    if (a.text) toast(a.text, a.kind === 'ok' ? 'ok' : 'bad');
   }
 
   // ---------------- main render ----------------
@@ -837,7 +998,7 @@
     setText($('#v-bat'), pct == null ? '--%' : pct + '%');
     setText($('#v-batv'), live && d.batV > 0 ? d.batV.toFixed(1) + 'V' : '--.-V');
     $('#bat-fill').style.width = (pct == null ? 0 : Math.max(4, Math.min(100, pct))) + '%';
-    $('#st-bat').className = 'stat ' + (pct == null ? '' : pct >= 50 ? 'ok' : pct >= 25 ? 'warn' : 'bad');
+    $('#st-bat').className = 'stat ' + (pct == null ? '' : live && d.lowBat >= 1 ? 'bad' : pct >= 50 ? 'ok' : pct >= 25 ? 'warn' : 'bad');
     const rc = l.connected && d.remotePct >= 0 ? d.remotePct : null;
     setText($('#v-rc'), rc == null ? '--%' : rc + '%');
     $('#st-rc').className = 'stat ' + (rc == null ? '' : rc >= 43 ? 'ok' : rc >= 26 ? 'warn' : 'bad');
@@ -874,6 +1035,12 @@
     setText($('#g-pos'), live && d.gimbalPos >= 0 ? `TILT ${d.gimbalPos}` : 'GIMBAL');
 
     renderWarnings(s);
+    renderAlert(s);
+    setAltMax(altCap(s));
+    // the plan summary depends on the drone's distance limit, home and battery: refresh it when they change
+    const pk = `${distCap(s)}|${s.home ? s.home.lat.toFixed(5) + ',' + s.home.lon.toFixed(5) : ''}|${Math.round((d.batPct || 0) / 5)}`;
+    if (pk !== planKey) { planKey = pk; updatePlanInfo(); }
+    if ($('#settings').classList.contains('show')) renderLimits(s);
     renderConnect(s);
     renderMission(s);
     renderModes(s);
@@ -923,14 +1090,22 @@
       plan.pts = [[-6.17415, 106.82595], [-6.17345, 106.82790], [-6.17440, 106.82965], [-6.17610, 106.82925], [-6.17675, 106.82730]];
       plan.sel = query.get('sel') ? +query.get('sel') : -1;
     }
+    if (query.get('plan') === 'long') {  // about 5 km out from home and back, at 10 m/s
+      plan.pts = [[-6.1610, 106.8330], [-6.1460, 106.8420], [-6.1320, 106.8350], [-6.1360, 106.8160], [-6.1520, 106.8120]];
+      plan.speed = 10;
+      setText($('b', $('#p-speed')), '10');
+    }
     if (query.get('main') === 'map') setMain('map');
     if (query.get('view') === 'plan') setView('plan'); else drawPlan();
     if (query.get('panel') === 'settings') setTimeout(openSettings, 50);
     if (query.get('modes')) setTimeout(openModes, 300);
     if (query.get('search')) setTimeout(() => { openSearch(); $('#s-input').value = query.get('search'); doSearch(); }, 400);
     const c = query.get('confirm');
-    const acts = { motors: actMotors, fly: actFly, rth: actRth, mission: () => $('#p-fly').onclick() };
+    const acts = { motors: actMotors, fly: actFly, rth: actRth, mission: () => $('#p-fly').onclick(),
+      limits: () => { openSettings(); limShow('alt', 5000); limShow('dist', 3000); limShow('rth', 60); $('#lim-apply').onclick(); },
+      nofly: () => { openSettings(); $('#nfz-clear').onclick(); } };
     if (acts[c]) setTimeout(acts[c], 450);
+    if (query.get('scroll') === 'limits') setTimeout(() => { $('#settings').scrollTop = $('#lim-alt').closest('.sect').offsetTop - 8; }, 700);
     if (query.get('menu')) setTimeout(() => onMapClick({ latlng: L.latLng(-6.17330, 106.82850) }), 600);
     if (query.get('touch')) setTimeout(() => {
       $('#stick-l').classList.add('active'); $('.knob', $('#stick-l')).style.transform = 'translate(-14px, -30px)';
@@ -946,7 +1121,21 @@
     const link = query.get('demo') || '';
     const warn = query.get('warn') === '1';
     const indoor = query.get('indoor') === '1' ? 1 : 0;
+    const nofly = query.get('nofly') === '1' ? 1 : 0;
     let armed = query.has('armed') ? +query.get('armed') : 2;
+    const longPlan = query.get('plan') === 'long', ld = longPlan ? 6000 : 2000;
+    let limits = query.get('limits') === 'none' ? { state: 'idle', msg: '' }
+      : { state: 'ok', msg: `The drone confirmed: max altitude 500 m, max distance ${ld} m, return altitude 40 m.`, alt: 500, dist: ld, rth: 40, dAlt: 500, dDist: ld, dRth: 40 };
+    let alert = { seq: 0, text: '', kind: '' };
+    const blockers = [];
+    if (warn) blockers.push('Compass disturbed here (interference 212, normal below 150): carry the drone a few metres away from metal, cars and reinforced concrete' +
+        (indoor ? '.' : ', or switch to attitude mode with the remote\'s GPS button (3 s) and steer it yourself (it drifts with the wind).') +
+        ' If it stays, calibrate the compass in an open place.',
+      'The drone reports low battery (10.62 V): charge or swap the battery.');
+    if (nofly) blockers.unshift('The drone has a no-fly block (set by the official app). Clear it in Settings › Flight limits.');
+    if (query.get('alert')) setTimeout(() => {
+      alert = { seq: 1, kind: 'bad', text: 'Take off: the motors did not start. ' + blockers.join(' ') };
+    }, 900);
     let rec = query.get('rec') === '1', recT = Date.now() - 83000, logV = 1, up = 0;
     let logText = '08:12:01  Ready. Plug in the remote, then tap Connect.\n08:12:09  Remote plugged in. Tap Connect.\n' +
       '08:12:11  Permission granted.\n08:12:11  Connected to vison android.usbaoa. Unplug the remote to disconnect.\n' +
@@ -976,13 +1165,14 @@
             lat: base[0] + (flying ? 0.0011 * Math.sin(a) : -0.0004), lon: base[1] + (flying ? 0.0016 * Math.cos(a) : -0.0009),
             alt: flying ? 42.3 + Math.sin(t / 5) : 0, dist: flying ? 128 + 30 * Math.sin(a) : 0,
             hs: flying ? 5.2 + 0.4 * Math.sin(t) : 0, vs: flying ? 0.4 * Math.sin(t / 3) : 0,
-            batV: warn ? 10.6 : 11.6, batPct: warn ? 21 : 76, lowBat: warn ? 1 : 0, remotePct: warn ? 15 : 64,
-            magErr: 0, magCal: warn ? 1 : 0, oaWarn: 0, hLimit: 0, dLimit: 0, forbid: 0, gale: warn ? 1 : 0, tempOver: 0, currOver: 0,
+            batV: warn ? 10.62 : 11.46, batPct: warn ? 21 : 76, batRaw: warn ? 11 : (flying ? 61 : 76), batSag: flying ? 15 : -1,
+            lowBat: warn ? 1 : 0, remotePct: warn ? 15 : 64, magInt: warn ? 212 : 64, sensors: 239,
+            magErr: 0, magCal: warn ? 1 : 0, oaWarn: 0, hLimit: 0, dLimit: 0, forbid: nofly, gale: warn ? 1 : 0, tempOver: 0, currOver: 0,
             emergRth: 255, lowRth: 255, flightS: armed ? 312 + t : 0, fc: 'HF-SH-F22N7R406.024.0509',
             stRoll: 150, stPitch: 170, stThr: 127, stYaw: 110
           },
           home: indoor ? null : { lat: base[0] - 0.0004, lon: base[1] - 0.0009 },
-          mission, cam: { rec: rec ? 1 : 0, recS: rec ? (Date.now() - recT) / 1000 : 0 }, handshake: 'ok',
+          mission, cam: { rec: rec ? 1 : 0, recS: rec ? (Date.now() - recT) / 1000 : 0 }, handshake: 'ok', limits, alert, blockers,
           media: { uri: savedAt ? 'demo' : '', mime: savedMime, at: savedAt, rec: rec ? 1 : 0 },
           video: { codec: 'H.265', w: 1280, h: 720, fps: 30, active: query.get('novideo') ? 0 : 1, dropped: 0 },
           phone: { lat: base[0] - 0.0006, lon: base[1] - 0.0013, acc: 4 }, insets: { l: 0, t: 0, r: 0, b: 0 }, logV
@@ -1000,6 +1190,17 @@
         return '';
       },
       mission(j) { mission = { state: 'uploading', msg: '', total: JSON.parse(j).points.length, acked: 0 }; up = 0; return ''; },
+      limits(j) {
+        const o = JSON.parse(j);
+        limits = { state: 'sending', msg: '', alt: o.alt, dist: o.dist, rth: o.rth };
+        setTimeout(() => {
+          const a = Math.min(o.alt, 500);
+          limits = { state: 'ok', alt: o.alt, dist: o.dist, rth: o.rth, dAlt: a, dDist: o.dist, dRth: o.rth,
+            msg: a === o.alt ? `The drone confirmed: max altitude ${a} m, max distance ${o.dist} m, return altitude ${o.rth} m.`
+              : `The drone answered max altitude ${a} m, max distance ${o.dist} m, return altitude ${o.rth} m (asked for ${o.alt}, ${o.dist} and ${o.rth} m): it keeps its own maximum.` };
+        }, 2500);
+        return '';
+      },
       sticks() {},
       clearMission() { if (mission.state !== 'uploading') mission = { state: 'idle', msg: '', total: 0, acked: 0 }; },
       connect() {},

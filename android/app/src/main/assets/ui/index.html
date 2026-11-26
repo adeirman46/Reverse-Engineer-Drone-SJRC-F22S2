@@ -84,7 +84,7 @@
   <div id="confirm">
     <div class="cf-head">
       <div class="cf-ic" id="cf-icon"></div>
-      <div><h3 id="cf-title">Confirm</h3><p id="cf-text"></p></div>
+      <div><h3 id="cf-title">Confirm</h3><p id="cf-text"></p><p class="cf-warn" id="cf-warn" hidden></p></div>
       <button class="cf-x" id="cf-cancel" title="Cancel"><svg class="i sm"><use href="#i-close"/></svg></button>
     </div>
     <div class="slider" id="cf-slider"><div class="fill" id="cf-fill"></div><div class="label" id="cf-label">Slide to confirm</div>
@@ -206,6 +206,17 @@
       <div class="item"><div>Link address<small class="kv" id="set-addr">-</small></div></div>
       <div class="item"><div>PC control<small>The computer on the link sends the flight commands; the app stops sending its own.</small></div><button class="toggle" data-key="pcControl"></button></div>
       <div class="item"><div>Send video to PC<small>Uses about 3.5 Mbit/s of Wi-Fi.</small></div><button class="toggle" data-key="pcVideo"></button></div>
+    </div>
+    <div class="sect"><h4>FLIGHT LIMITS</h4>
+      <div class="item"><div>Max altitude<small>Above the take-off point.</small></div>
+        <div class="numstep" id="lim-alt"><button data-d="-1">−</button><input type="number" inputmode="numeric" min="10" max="5000"><u>m</u><button data-d="1">+</button></div></div>
+      <div class="item"><div>Max distance<small>From the take-off point. At the limit the drone returns home.</small></div>
+        <div class="numstep" id="lim-dist"><button data-d="-1">−</button><input type="number" inputmode="numeric" min="20" max="6000"><u>m</u><button data-d="1">+</button></div></div>
+      <div class="item"><div>Return-home altitude<small>Climbs to this before flying back.</small></div>
+        <div class="numstep" id="lim-rth"><button data-d="-1">−</button><input type="number" inputmode="numeric" min="20" max="120"><u>m</u><button data-d="1">+</button></div></div>
+      <div class="limstat" id="lim-status">-</div>
+      <button class="btn primary wide" id="lim-apply"><svg class="i sm"><use href="#i-up"/></svg>Apply to drone</button>
+      <div class="item nfz"><div>No-fly zones<small id="nfz-text">-</small></div><button class="btn" id="nfz-clear" hidden>Clear</button></div>
     </div>
     <div class="sect"><h4>DRONE</h4>
       <div class="item"><div>Flight controller<small class="kv" id="set-fc">-</small></div></div>

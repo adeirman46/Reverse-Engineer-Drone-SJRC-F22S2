@@ -9,7 +9,7 @@ heartbeats and flight messages.
 
 Needs a USB port that can work as a device: on the Raspberry Pi 5 the USB-C port with
 dtoverlay=dwc2,dr_mode=peripheral. EXPERIMENTAL: written to the kernel and AOA specifications,
-not yet tested with the remote; see raspi/README.md.
+not yet tested with the remote; see bridge/README.md.
 """
 import os
 import queue

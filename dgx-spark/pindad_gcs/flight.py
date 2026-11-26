@@ -3,7 +3,7 @@
 After a startup handshake: a control and an extend message every 100 ms with the sticks centred; a
 button press is a flag held at 1 for one second. Every command is checked against live telemetry.
 Results of the drone tests (props off): start motors, take off (only with the motors running), land,
-waypoint upload all work; GPS/attitude and sport are the remote's buttons only.
+waypoint upload all work; sport is the remote's button only (GPS -> attitude from the app is untested).
 """
 import math
 import threading
@@ -12,6 +12,19 @@ import time
 from . import protocol as P
 
 STICK_LIMIT = 0.7  # never reach the full-deflection stick combinations (motor start, compass cal, reset)
+# Flight limits (68 1B 0A) accepted from the pilot, in metres
+LIM_ALT = (10, 5000)
+LIM_DIST = (20, 10000)
+LIM_RTH = (20, 120)
+# Missions: the manual and the official app allow 16 waypoints. The drone turns home when it reaches its distance
+# limit, so every waypoint stays a little inside it; 1500 m while the limit is unknown.
+MISSION_MAX_POINTS = 16
+MISSION_LIMIT_MARGIN_M = 30
+DEFAULT_DIST_LIMIT = 1500
+
+
+def fmt_dist(m):
+    return f"{m:.0f} m" if m < 1000 else f"{m / 1000:.2f} km"
 
 
 def distance_m(lat1, lon1, lat2, lon2):
@@ -41,6 +54,14 @@ class Flight:
         self.photo_seq = 1
         self.gimbal_target, self.gimbal_sent_at = 0, 0.0
         self.takeoff_deadline = self.takeoff_at = 0.0
+        self.arm_deadline = self.no_fly_check_at = 0.0
+        # messages for the pilot that arrive after the command returned (shown as a toast)
+        self.alert = {"seq": 0, "text": "", "kind": ""}
+        # flight limits: the pilot's values (re-sent after every connection), and the sending state
+        self.saved_limits = None  # (alt, dist, rth) or None
+        self.limits = {"state": "idle", "msg": ""}
+        self._lim = None  # {"want", "tries", "next", "sent_at"}
+        self._auto_limits = False
         self.thread = None
 
     # ---------- loop ----------
@@ -51,6 +72,7 @@ class Flight:
         self.thread.start()
 
     def _run(self):
+        self._auto_limits = True
         self._handshake()
         nxt = time.monotonic()
         while self.link.connected:
@@ -91,8 +113,10 @@ class Flight:
         now = time.monotonic()
         self._mission_tick(now)
         self._takeoff_tick(now)
+        self._arm_tick(now)
         if not self.enabled:
             return
+        self._limits_tick(now)
         with self.lock:
             c = dict(P.CONTROL_DEFAULTS)
             for f, (v, until) in self.holds.items():
@@ -140,6 +164,7 @@ class Flight:
             if armed:
                 return "The motors are already running."
             self._hold("lockUnlock", 1, 1.0)
+            self.arm_deadline = time.monotonic() + 7
         elif name == "takeoff":
             if armed == 2:
                 return "Already flying."
@@ -183,6 +208,17 @@ class Flight:
             with self.lock:
                 self.yaw_hold = (128 - 45 if name == "yawLeft" else 128 + 45, time.monotonic() + 0.45)
             return None
+        elif name == "clearNoFly":
+            # The official app toggles the drone's take-off block with a 1 s pulse of the extend bit
+            # ForbidTakeOff (on inside its no-fly-zone list, again to clear it outside). This app has no
+            # such list and never sets it; this clears a block the official app left on the drone.
+            if armed:
+                return "Only with the motors stopped."
+            if d["forbid"] != 1:
+                return "The drone has no no-fly block."
+            with self.lock:
+                self.xholds["ForbidTakeOff"] = time.monotonic() + 1.0
+            self.no_fly_check_at = time.monotonic() + 4
         elif name == "beep":
             if armed:
                 return "Only with the motors stopped."
@@ -217,7 +253,7 @@ class Flight:
                 self.takeoff_deadline = 0.0
             elif now > self.takeoff_deadline:
                 self.takeoff_deadline = 0.0
-                self.log("Take off: the motors did not start (GPS mode needs a GPS fix).")
+                self.send_alert(self._not_started("Take off"), "bad")
             elif armed == 1:
                 if not self.takeoff_at:
                     self.takeoff_at = now + 1.5
@@ -225,6 +261,107 @@ class Flight:
                     self._hold("autoTakeoff", 1, 1.0)
                     self.takeoff_deadline = 0.0
                     self.log("Take off: sent.")
+
+    def _arm_tick(self, now):
+        if self.arm_deadline:
+            if self.tel.d["armed"]:
+                self.arm_deadline = 0.0
+            elif now > self.arm_deadline:
+                self.arm_deadline = 0.0
+                self.send_alert(self._not_started("Start motors"), "bad")
+        if self.no_fly_check_at and now > self.no_fly_check_at:
+            self.no_fly_check_at = 0.0
+            if self.tel.d["forbid"] == 0:
+                self.send_alert("No-fly block cleared.", "ok")
+            else:
+                self.send_alert("The no-fly block is still set. Restart the drone and try again.", "bad")
+
+    def _not_started(self, what):
+        why = self.tel.blockers()
+        if not why:
+            return (f"{what}: the motors did not start and the drone reports no reason. Try again, or start"
+                    " them with the remote's sticks (both down and outward).")
+        return f"{what}: the motors did not start. " + " ".join(why)
+
+    def send_alert(self, text, kind):
+        self.alert = {"seq": self.alert["seq"] + 1, "text": text, "kind": kind}
+        self.log(text)
+
+    # ---------- flight limits ----------
+    def set_limits(self, alt, dist, rth):
+        """Sends the drone's flight limits; returns None when sending started, else the reason."""
+        d = self.tel.d
+        if not self.link.connected:
+            return "The remote is not connected."
+        if not self.enabled:
+            return "Flight control from this computer is off."
+        if not self.tel.fresh():
+            return "No live data from the drone."
+        if not LIM_ALT[0] <= alt <= LIM_ALT[1]:
+            return "Max altitude must be 10 to 5000 m."
+        if not LIM_DIST[0] <= dist <= LIM_DIST[1]:
+            return "Max distance must be 20 to 10000 m."
+        if not LIM_RTH[0] <= rth <= LIM_RTH[1]:
+            return "Return-home altitude must be 20 to 120 m."
+        if rth > alt:
+            return "The return-home altitude cannot be above the max altitude."
+        if d["armed"] == 2:
+            if alt < d["alt"] + 5:
+                return f"The drone is at {d['alt']:.0f} m: set the max altitude above that, or land first."
+            if dist < d["dist"] + 10:
+                return f"The drone is {d['dist']} m away: set the max distance above that, or land first."
+        with self.lock:
+            self._lim = {"want": (alt, dist, rth), "tries": 0, "next": 0.0, "sent_at": time.monotonic()}
+            self.limits = {"state": "sending", "msg": "Sending the limits to the drone..."}
+        self.log(f"Flight limits: sending max altitude {alt} m, max distance {dist} m, return altitude {rth} m.")
+        return None
+
+    def _limits_tick(self, now):
+        if self._auto_limits and self.handshake in ("ok", "no-reply"):
+            if self.saved_limits is None:
+                self._auto_limits = False
+            elif self.tel.fresh():
+                self._auto_limits = False
+                r = self.set_limits(*self.saved_limits)
+                if r:
+                    self.log("Flight limits not re-applied: " + r)
+        lim = self._lim
+        if self.limits["state"] != "sending" or lim is None:
+            return
+        got = self.tel.lim
+        if got and got["at"] > lim["sent_at"]:
+            a, dd, r = got["alt"], got["dist"], got["rth"]
+            w = lim["want"]
+            if (a, dd, r) == tuple(w):
+                msg = f"The drone confirmed: max altitude {a} m, max distance {dd} m, return altitude {r} m."
+                self.limits = {"state": "ok", "msg": msg}
+                self.log("Flight limits: " + msg)
+            else:
+                msg = (f"The drone answered max altitude {a} m, max distance {dd} m, return altitude {r} m"
+                       f" (asked for {w[0]}, {w[1]} and {w[2]} m): it keeps its own maximum.")
+                self.limits = {"state": "ok", "msg": msg}
+                self.send_alert("Flight limits: " + msg, "bad")
+            return
+        if now < lim["next"]:
+            return
+        if lim["tries"] >= 5:
+            msg = "The drone did not confirm the limits. Is it switched on?"
+            self.limits = {"state": "no-reply", "msg": msg}
+            self.send_alert("Flight limits: " + msg, "bad")
+            return
+        self.link.send_drone(P.flight_limits(*lim["want"]))
+        lim["tries"] += 1
+        lim["next"] = now + 2.0
+
+    def limits_state(self):
+        """The interface's "limits" object (same keys as the Android app)."""
+        s = dict(self.limits)
+        if self.saved_limits:
+            s.update(alt=self.saved_limits[0], dist=self.saved_limits[1], rth=self.saved_limits[2])
+        got = self.tel.lim
+        if got:
+            s.update(dAlt=got["alt"], dDist=got["dist"], dRth=got["rth"])
+        return s
 
     # ---------- waypoint mission ----------
     def start_mission(self, points, alt, speed, hover):
@@ -241,18 +378,31 @@ class Flight:
             return "Switch the drone to GPS mode first."
         if not d["gpsFine"] or not d["hasFix"]:
             return "Waiting for a GPS fix."
-        if not 1 <= len(points) <= 32:
-            return "1 to 32 waypoints."
-        if not 5 <= alt <= 120:
-            return "Altitude must be 5 to 120 m."
+        if not points:
+            return "Add at least one waypoint."
+        if len(points) > MISSION_MAX_POINTS:
+            return "At most 16 waypoints (the drone's manual allows 16)."
+        if not 5 <= alt <= P.WAYPOINT_MAX_ALT_M:
+            return "Altitude must be 5 to 409 m (the most a waypoint message can carry)."
+        if self.tel.lim and self.tel.lim["alt"] > 0 and alt > self.tel.lim["alt"]:
+            return f"The drone's max altitude is {self.tel.lim['alt']} m. Raise it in Settings › Flight limits."
         if not 1 <= speed <= 10:
             return "Speed must be 1 to 10 m/s."
         if not 0 <= hover <= 60:
             return "Hover time must be 0 to 60 s."
+        if self.mission["state"] == "uploading":
+            return "A mission is already uploading."
+        # The drone measures its distance limit from home (the take-off point).
+        max_dist = self.mission_distance_limit()
+        home = self.tel.home
+        ref = home if home else (d["lat"], d["lon"])
         for i, (lat, lon) in enumerate(points):
-            dist = distance_m(d["lat"], d["lon"], lat, lon)
-            if dist > 1500:
-                return f"Waypoint {i + 1} is {dist:.0f} m away (limit 1500 m)."
+            dist = distance_m(ref[0], ref[1], lat, lon)
+            if math.isnan(dist) or dist > max_dist - MISSION_LIMIT_MARGIN_M:
+                return (f"Waypoint {i + 1} is {fmt_dist(dist)} from {'home' if home else 'the drone'}, but the"
+                        f" drone's distance limit is {fmt_dist(max_dist)} (waypoints must stay"
+                        f" {MISSION_LIMIT_MARGIN_M} m inside it). Raise Max distance in Settings › Flight limits"
+                        " (up to 10 km).")
         with self.lock:
             self._mission = {"points": points, "alt": alt, "speed": int(speed), "hover": int(hover),
                              "step": 0, "step_start": time.monotonic(), "last_send": 0.0, "saw_point": False}
@@ -260,6 +410,13 @@ class Flight:
             self.mission = {"state": "uploading", "msg": "Uploading waypoints...", "total": len(points), "acked": 0}
         self.log(f"Mission: uploading {len(points)} waypoints at {alt:.0f} m, {speed} m/s.")
         return None
+
+    def mission_distance_limit(self):
+        """The distance limit missions must stay inside: the drone's confirmed one, else the one set here, else 1500 m."""
+        lim = self.tel.lim
+        if lim and lim["dist"] > 0:
+            return lim["dist"]
+        return self.saved_limits[1] if self.saved_limits else DEFAULT_DIST_LIMIT
 
     def clear_mission(self):
         if self.mission["state"] != "uploading":

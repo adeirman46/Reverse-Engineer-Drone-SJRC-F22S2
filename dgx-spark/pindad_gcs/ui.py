@@ -1,6 +1,6 @@
 """Qt window: the same interface as the Android app (HTML/CSS/JS) in a QWebEngineView.
 
-Works with PySide6 (pip) or PyQt5 (Raspberry Pi OS: apt install python3-pyqt5.qtwebengine).
+Works with PySide6 (pip) or PyQt5 (Ubuntu / DGX OS: apt install python3-pyqt5.qtwebengine).
 """
 import json
 import os
@@ -56,6 +56,9 @@ class Bridge(QObject):
             "d": d,
             "home": {"lat": tel.home[0], "lon": tel.home[1]} if tel.home else None,
             "mission": flight.mission,
+            "limits": flight.limits_state(),
+            "alert": flight.alert,
+            "blockers": tel.blockers(),
             "cam": {"rec": int(flight.recording),
                     "recS": time.monotonic() - flight.record_start if flight.recording else 0},
             "handshake": flight.handshake,
@@ -84,6 +87,26 @@ class Bridge(QObject):
         except (ValueError, KeyError, TypeError) as e:
             return f"Bad mission data: {e}"
 
+    @Slot(str, result=str)
+    def limits(self, text):
+        """Flight limits {"alt", "dist", "rth"} in metres: sent to the drone and kept for next time."""
+        try:
+            o = json.loads(text)
+            alt, dist, rth = int(o["alt"]), int(o["dist"]), int(o["rth"])
+        except (ValueError, KeyError, TypeError) as e:
+            return f"Bad limits: {e}"
+        flight = self.ctx["link"].flight
+        r = flight.set_limits(alt, dist, rth)
+        if r:
+            return r
+        flight.saved_limits = (alt, dist, rth)
+        try:
+            from .app import save_settings
+            save_settings({"limits": [alt, dist, rth]})
+        except OSError as e:
+            return f"Sent, but could not save the limits: {e}"
+        return ""
+
     @Slot(float, float, float, float)
     def sticks(self, yaw, thr, roll, pitch):
         self.ctx["link"].flight.set_sticks(yaw, thr, roll, pitch)
@@ -94,7 +117,7 @@ class Bridge(QObject):
 
     @Slot()
     def connect(self):
-        pass  # the Raspberry Pi connects by itself
+        pass  # the ground station connects by itself
 
     @Slot(result=str)
     def log(self):
@@ -112,7 +135,7 @@ class Bridge(QObject):
                  if self.ctx["rtsp"] else "RTSP off")
         return json.dumps({"video": int(link.video_enabled), "fill": 0, "pcControl": 0 if link.flight.enabled else 1,
                            "pcVideo": 0, "sticks": int(link.flight.sticks_enabled), "stickPriority": 0, "port": 0,
-                           "addresses": f"{addr}  ·  {where}", "version": f"{__version__} (Raspberry Pi, {QT})"})
+                           "addresses": f"{addr}  ·  {where}", "version": f"{__version__} (Linux ground station, {QT})"})
 
     @Slot(str, str)
     def set(self, key, value):

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Creates the USB gadget that lets the SJRC remote plug into this Raspberry Pi as if it were the
+# Creates the USB gadget that lets the SJRC remote plug into this board (the bridge) as if it were the
 # Android phone (Android Open Accessory: 18d1:2d00, FunctionFS). Run as root after every boot
-# (the systemd unit does it). Then start the app with --link gadget; it binds the gadget itself.
+# (pindad-bridge.service does it). Then start: python3 -m pindad_gcs.bridge (it binds the gadget).
 #
 # One-time setup on a Raspberry Pi 5: add to /boot/firmware/config.txt (under [all]):
 #     dtoverlay=dwc2,dr_mode=peripheral

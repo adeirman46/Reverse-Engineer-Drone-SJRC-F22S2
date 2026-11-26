@@ -10,8 +10,8 @@ android {
         applicationId = "com.ugvuav.gcs"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.2"
+        versionCode = 7
+        versionName = "1.4"
     }
 
     buildTypes {

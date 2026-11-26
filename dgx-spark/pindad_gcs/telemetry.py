@@ -7,7 +7,12 @@ import struct
 import threading
 import time
 
+from .battery import BatteryEstimator
 from .protocol import bits, xor
+
+
+def _ms():
+    return int(time.monotonic() * 1000)
 
 
 def _ascii(b):
@@ -37,6 +42,8 @@ class Telemetry:
         self.home = None
         self.armed_since = 0.0
         self.last_flight_s = 0.0
+        self.battery = BatteryEstimator()  # steady percentage (the drone's own number sags in flight)
+        self.lim = None  # flight limits the drone confirmed (AB / 9A): {"alt", "dist", "rth", "at"}
 
     # ---------- state helpers ----------
     def fresh(self):
@@ -47,6 +54,9 @@ class Telemetry:
             self.stream.clear()
             self.relay_reply = None
             self.got_version = False
+            self.lim = None  # the drone answers its limits again after each connection (the app re-sends them)
+        if self.battery.stale_for(_ms(), 60000):  # keep the estimate over a short reconnect
+            self.battery.reset()
 
     def snapshot(self):
         with self.lock:
@@ -57,7 +67,52 @@ class Telemetry:
         d["flightS"] = (now - self.armed_since) if self.armed_since else self.last_flight_s
         if d["batV"] <= 0:
             d["batV"] = self.bat_v_8b
+        d["batPct"] = self.battery.percent()
+        d["batRaw"] = self.battery.raw()
+        d["batSag"] = self.battery.sag_pct()
         return d
+
+    def blockers(self):
+        """Why the drone may refuse to start its motors, from its live status (same texts as the app)."""
+        r = []
+        if not self.fresh():
+            return r
+        d = self.d
+        sensors = d["sensors"]
+        if d["forbid"] == 1:
+            r.append("The drone has a no-fly block (set by the official app). Clear it in Settings › Flight limits.")
+        if not sensors & 0x01:
+            r.append("Gyro not ready: keep the drone still on level ground.")
+        if not sensors & 0x02:
+            r.append("Barometer not ready.")
+        if not sensors & 0x04:
+            r.append("Compass not detected: restart the drone.")
+        # 8B byte 6 bits 5-7 are 1 when calibrated; 0 while a calibration started with the sticks runs
+        if sensors & 0xC0 != 0xC0:
+            r.append("Compass calibration is running: finish it or restart the drone.")
+        if not sensors & 0x20:
+            r.append("Level calibration is running: keep the drone still on level ground.")
+        if d["magErr"] == 1:
+            r.append("Compass error: restart the drone, then calibrate the compass.")
+        elif d["magCal"] == 1 or d["magInt"] > 150:
+            # The check is the drone's own; no command switches it off. Attitude mode does not hold position with
+            # GPS + compass (the manual's way out when GPS mode will not start); not yet confirmed for the compass.
+            s = (f"Compass disturbed here (interference {d['magInt']}, normal below 150): carry"
+                 " the drone a few metres away from metal, cars and reinforced concrete")
+            s += (", or switch to attitude mode with the remote's GPS button (3 s) and steer it yourself (it drifts"
+                  " with the wind)." if d["indoor"] == 0 else ".")
+            r.append(s + " If it stays, calibrate the compass in an open place.")
+        if d["indoor"] == 0 and d["gpsFine"] == 0:
+            r.append(f"GPS mode needs a GPS fix ({d['gpsNum']} satellites): wait in the open, or switch to"
+                     " attitude mode with the remote's GPS button (3 s).")
+        if d["lowBat"] >= 1:
+            v = d["batV"] if d["batV"] > 0 else self.bat_v_8b
+            r.append(f"The drone reports low battery ({v:.2f} V): charge or swap the battery.")
+        if abs(d["roll"]) > 25 or abs(d["pitch"]) > 25:
+            r.append("The drone is not level.")
+        if d["tempOver"] == 1:
+            r.append("The drone is overheating.")
+        return r
 
     # ---------- input ----------
     def on_frame(self, ftype, payload):
@@ -125,10 +180,11 @@ class Telemetry:
                 d.update(stRoll=p[24], stPitch=p[25], stThr=p[26], stYaw=p[27])
             elif mid == 0x9C and len(p) >= 12:
                 d.update(magInt=bits(p, 0, 10), batV=bits(p, 10, 12) / 100, indoor=bits(p, 32, 1),
-                         batPct=bits(p, 33, 7), remotePct=bits(p, 54, 7), magErr=bits(p, 63, 1),
+                         remotePct=bits(p, 54, 7), magErr=bits(p, 63, 1),
                          hLimit=bits(p, 64, 1), dLimit=bits(p, 65, 1), oaWarn=bits(p, 67, 1),
                          oaDis=bits(p, 68, 5), magCal=bits(p, 73, 1), sport=bits(p, 74, 1),
                          autoMode=bits(p, 78, 4), rtl=bits(p, 82, 4))
+                self.battery.update(bits(p, 33, 7), d["armed"], d["lowBat"], int(now * 1000))
             elif mid == 0x9D and len(p) >= 14:
                 lon, lat, alt, dist = struct.unpack_from("<iihh", p, 0)
                 fix = lon != 0 or lat != 0
@@ -144,10 +200,15 @@ class Telemetry:
                 d.update(gimbal=gimbal, terrain=terrain, emergRth=p[5], lowRth=p[9])
             elif mid == 0x84 and len(p) >= 1:
                 self.waypoint_ack = p[0]
+            elif mid == 0xAB and len(p) >= 30:  # settings reply: name, version, then u16 metres
+                alt, dist, rth = struct.unpack_from("<HHH", p, 24)
+                self.lim = {"alt": alt, "dist": dist, "rth": rth, "at": now}
             elif mid in (0xFE, 0x9A):
                 if not self.got_version:
                     self.got_version = True
                     d["fc"] = _ascii(p[:24])
                     self.log("Flight controller: " + d["fc"])
+                if mid == 0x9A and len(p) >= 28:  # older settings reply: 10/12/10-bit fields
+                    self.lim = {"alt": bits(p, 192, 10), "dist": bits(p, 202, 12), "rth": bits(p, 214, 10), "at": now}
             elif mid == 0xBE:
                 d["fcLog"] = _ascii(p)

@@ -37,6 +37,13 @@ SCREENS=(
   "25-plan-drone-without-gps|view=plan&plan=demo&indoor=1&armed=0"
   "26-map-search|main=map&search=Monas Jakarta"
   "27-photo-saved-to-gallery|saved=1&rec=1"
+  "28-settings-flight-limits|panel=settings&scroll=limits"
+  "29-confirm-flight-limits|confirm=limits"
+  "30-confirm-take-off-with-warning|armed=0&warn=1&confirm=fly"
+  "31-take-off-refused-reason|armed=0&warn=1&alert=1"
+  "32-no-fly-block-left-by-official-app|panel=settings&nofly=1&armed=0&scroll=limits"
+  "33-plan-long-mission|view=plan&plan=long"
+  "34-plan-confirm-long-mission|view=plan&plan=long&confirm=mission"
 )
 SIZES=("phone|873,393" "tablet|1280,800")
 

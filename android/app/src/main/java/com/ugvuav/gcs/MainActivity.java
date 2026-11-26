@@ -104,6 +104,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         link.pcVideo = prefs.getBoolean("pcVideo", false);
         link.flight.sticksEnabled = prefs.getBoolean("sticks", true);
         link.flight.stickPriority = prefs.getBoolean("stickPriority", false);
+        if (prefs.contains("limAlt")) {
+            link.flight.savedLimits = new int[]{prefs.getInt("limAlt", 120), prefs.getInt("limDist", 1500),
+                    prefs.getInt("limRth", 30)};
+        }
         fill = prefs.getBoolean("fill", false);
 
         root = new FrameLayout(this);
@@ -430,6 +434,23 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 }
             });
             return "";
+        }
+
+        /** Flight limits {"alt":m,"dist":m,"rth":m}: sent to the drone, kept, and re-sent after each connection. */
+        @JavascriptInterface
+        public String limits(String json) {
+            try {
+                JSONObject o = new JSONObject(json);
+                int alt = o.getInt("alt"), dist = o.getInt("dist"), rth = o.getInt("rth");
+                Flight f = Link.get().flight;
+                String r = f.setLimits(alt, dist, rth);
+                if (r != null) return r;
+                f.savedLimits = new int[]{alt, dist, rth};
+                prefs.edit().putInt("limAlt", alt).putInt("limDist", dist).putInt("limRth", rth).apply();
+                return "";
+            } catch (Exception e) {
+                return "Bad limits: " + e.getMessage();
+            }
         }
 
         @JavascriptInterface

@@ -86,6 +86,25 @@ final class Protocol {
         return message(0x04, d);
     }
 
+    /** Highest waypoint altitude the waypoint message can carry: 12 bits of decimetres. */
+    static final double WAYPOINT_MAX_ALT_M = 409;
+
+    /**
+     * Flight limits 68 1B 0A (SendSettingParamsUtils for HiSi drones, LGDataUtils.convertHy1BSetInfo):
+     * UseMagDec u8 and MagDec u8 (the official app sends 0, 0), then u16 little-endian metres: maximum
+     * altitude, maximum distance, return-home altitude, and a second return altitude (sent as 0).
+     * The official app repeats it every 2 s, at most 5 times, until the drone answers AB (or 9A) with
+     * the limits it now uses. Its sliders: altitude 10-120 m (10-500 m in its hidden "super altitude"
+     * mode), distance 20-6000 m, return altitude 20-120 m.
+     */
+    static byte[] flightLimits(int altM, int distM, int rthM) {
+        byte[] d = new byte[10];
+        putShort(d, 2, altM);
+        putShort(d, 4, distM);
+        putShort(d, 6, rthM);
+        return message(0x1B, d);
+    }
+
     /** Startup handshake step 1 ("fixedHackFly"); the relay answers FF 53 54 24 xx. */
     static final byte[] FIX_HACK_FLY = {(byte) 0xFF, 0x53, 0x54, 0x24, 0x02};
 
@@ -122,6 +141,11 @@ final class Protocol {
     static final int GIMBAL_STEP = 9, GIMBAL_MAX = 90;
 
     // ---------- helpers ----------
+    static void putShort(byte[] b, int off, int v) {
+        b[off] = (byte) v;
+        b[off + 1] = (byte) (v >> 8);
+    }
+
     static void putInt(byte[] b, int off, int v) {
         b[off] = (byte) v;
         b[off + 1] = (byte) (v >> 8);

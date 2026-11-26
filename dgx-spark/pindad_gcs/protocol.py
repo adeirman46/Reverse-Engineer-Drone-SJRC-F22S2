@@ -79,6 +79,16 @@ def waypoint(index, lat, lon, alt_m, speed, hover):
     return message(0x04, struct.pack("<iiI", round(lon * 1e7), round(lat * 1e7), tail))
 
 
+WAYPOINT_MAX_ALT_M = 409  # 12 bits of decimetres
+
+
+def flight_limits(alt_m, dist_m, rth_m):
+    """68 1B 0A (official SendSettingParamsUtils for HiSi drones, convertHy1BSetInfo): UseMagDec and
+    MagDec (0, 0), then u16 metres: max altitude, max distance, return-home altitude, second return
+    altitude (0). Repeated every 2 s, at most 5 times, until the drone answers AB (or 9A)."""
+    return message(0x1B, struct.pack("<BBHHHH", 0, 0, alt_m, dist_m, rth_m, 0))
+
+
 FIX_HACK_FLY = bytes([0xFF, 0x53, 0x54, 0x24, 0x02])  # startup handshake step 1 (relay)
 
 
